@@ -46,6 +46,14 @@ def test_satisfies_unsupported_constraint_returns_none():
     assert satisfies("20.0.0", ">=foo") is None
     assert satisfies("20.0.0", "<foo") is None
 
+
+def test_satisfies_operator_with_space_after():
+    # Bug thật từ Express (package.json: "node": ">= 18") — có khoảng trắng sau operator
+    assert satisfies("v24.14.1", ">= 18")
+    assert satisfies("20.5.0", "~ 20.4.0") is False  # ~20.4.x, 20.5 không thỏa
+    assert satisfies("20.4.9", "~ 20.4.0")
+    assert satisfies("18.1.0", "< 20.0.0")
+
 def test_parse_version_extracts_numbers():
     assert parse_version("Node.js v20.11.1") == (20, 11, 1)
     assert parse_version("") == ()

@@ -29,6 +29,10 @@ def satisfies(installed: str, constraint: str) -> bool | None:
     if not iv:
         return None
     c = constraint.strip()
+    # Chuẩn hóa: bỏ khoảng trắng sau operator (vd ">= 18" -> ">=18", "~ 20" -> "~20").
+    # Đúng semver convention; tránh nhầm ">= 18" thành khoảng version 2 phần.
+    c = re.sub(r"(>=|<=|==|!=|>|<|\^|~)\s+", r"\1", c)
+    c = c.strip()
     if not c or c.lower() in ("*", "latest", "x", "X"):
         return None  # không ràng buộc khả thi để so sánh -> chưa xác định
     if "lts" in c.lower() or "/" in c:
