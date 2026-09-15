@@ -270,3 +270,48 @@ def test_services_missing_docker_is_fail(fake_runner, monkeypatch, tmp_path):
     results = ServicesChecker().run(CheckContext(repo_path=str(repo), os="windows"))
     by_id = {r.check_id: r for r in results}
     assert by_id["services.container.present"].status == CheckStatus.FAIL
+
+
+# ---------------- Registry section ----------------
+from setup_doctor.checkers.registry import RegistryChecker
+
+
+def _registry_patch(fake_runner, monkeypatch):
+    monkeypatch.setattr("setup_doctor.checkers.registry.which",
+                        lambda name: "C:\\git\\git.exe" if name == "git" else None)
+    monkeypatch.setattr("setup_doctor.checkers.registry.run_command", fake_runner)
+    return "C:\\git\\git.exe"
+
+
+def test_registry_git_user_warning_ssh_skip_https(fake_runner, monkeypatch, tmp_path):
+    repo = _node_context(tmp_path, {})
+    # remote là HTTPS -> SSH check skip
+    (repo / ".git").mkdir()
+    (repo / ".git" / "config").write_text(
+        '[remote "origin"]\n\turl = https://github.com/example/repo.git\n',
+        encoding="utf-8")
+    exe = _registry_patch(fake_runner, monkeypatch)
+    fake_runner.set([exe, "config", "--get", "user.name"], CommandResult(0, "Alice", ""))
+    fake_runner.set([exe, "config", "--get", "user.email"], CommandResult(0, "alice@example.com", ""))
+    monkeypatch.setattr("setup_doctor.checkers.registry._ssh_key_exists", lambda: False)
+    results = RegistryChecker().run(CheckContext(repo_path=str(repo), os="windows", config=object()))
+    by_id = {r.check_id: r for r in results}
+    assert by_id["registry.git.user"].status == CheckStatus.PASS
+    assert by_id["registry.git.ssh"].status == CheckStatus.SKIP  # remote HTTPS -> không cần SSH
+
+
+def test_registry_git_user_missing_is_warning_not_error(fake_runner, monkeypatch, tmp_path):
+    repo = _node_context(tmp_path, {})
+    (repo / ".git").mkdir()
+    (repo / ".git" / "config").write_text(
+        '[remote "origin"]\n\turl = git@github.com:example/repo.git\n',
+        encoding="utf-8")
+    exe = _registry_patch(fake_runner, monkeypatch)
+    fake_runner.set([exe, "config", "--get", "user.name"], CommandResult(1, "", ""))
+    fake_runner.set([exe, "config", "--get", "user.email"], CommandResult(1, "", ""))
+    monkeypatch.setattr("setup_doctor.checkers.registry._ssh_key_exists", lambda: True)
+    results = RegistryChecker().run(CheckContext(repo_path=str(repo), os="windows", config=object()))
+    by_id = {r.check_id: r for r in results}
+    assert by_id["registry.git.user"].status == CheckStatus.FAIL
+    assert by_id["registry.git.user"].severity == Severity.WARNING
+    assert by_id["registry.git.ssh"].status == CheckStatus.PASS
