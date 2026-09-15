@@ -224,3 +224,49 @@ def test_dotnet_cli_list_fails_is_error(fake_runner, monkeypatch, tmp_path):
     by_id = {r.check_id: r for r in results}
     assert by_id["dotnet.runtime.present"].status == CheckStatus.FAIL
     assert by_id["dotnet.sdk.version"].status == CheckStatus.SKIP
+
+
+# ---------------- Services section ----------------
+from setup_doctor.checkers.services import ServicesChecker
+
+
+def _services_patch(fake_runner, monkeypatch):
+    monkeypatch.setattr("setup_doctor.checkers.services.which",
+                        lambda name: "C:\\docker\\docker.exe" if name == "docker" else None)
+    monkeypatch.setattr("setup_doctor.checkers.services.run_command", fake_runner)
+    return "C:\\docker\\docker.exe"
+
+
+def test_services_fail_no_env(fake_runner, monkeypatch, tmp_path):
+    repo = _node_context(tmp_path, {
+        "docker-compose.yml": "services:\n  db:\n    image: postgres:16\n  redis:\n    image: redis:7\n",
+        ".env.example": "DATABASE_URL=postgres://localhost:5432/app",
+    })
+    exe = _services_patch(fake_runner, monkeypatch)
+    fake_runner.set([exe, "info"], CommandResult(0, "Server Version: 26.0.0", ""))
+    fake_runner.set([exe, "compose", "ps", "--format", "{{.Name}}"], CommandResult(0, "repo-db-1\nrepo-redis-1", ""))
+    monkeypatch.setattr("setup_doctor.checkers.services._port_open", lambda host, port: True)
+    results = ServicesChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    by_id = {r.check_id: r for r in results}
+    assert by_id["services.envfile"].status == CheckStatus.FAIL  # .env missing
+    assert by_id["services.compose.up"].status == CheckStatus.PASS
+
+
+def test_services_db_port_closed(fake_runner, monkeypatch, tmp_path):
+    repo = _node_context(tmp_path, {"docker-compose.yml": "services:\n  db:\n    image: postgres:16\n"})
+    exe = _services_patch(fake_runner, monkeypatch)
+    fake_runner.set([exe, "info"], CommandResult(0, "Server Version: 26.0.0", ""))
+    fake_runner.set([exe, "compose", "ps", "--format", "{{.Name}}"], CommandResult(0, "repo-db-1", ""))
+    monkeypatch.setattr("setup_doctor.checkers.services._port_open", lambda host, port: False)
+    results = ServicesChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    assert results[2].check_id == "services.db.port"
+    assert results[2].status == CheckStatus.FAIL
+
+
+def test_services_missing_docker_is_fail(fake_runner, monkeypatch, tmp_path):
+    # Repo có docker-compose nhưng docker không cài -> container.present phải FAIL (không SKIP)
+    repo = _node_context(tmp_path, {"docker-compose.yml": "services:\n  db:\n    image: postgres:16\n"})
+    monkeypatch.setattr("setup_doctor.checkers.services.which", lambda name: None)
+    results = ServicesChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    by_id = {r.check_id: r for r in results}
+    assert by_id["services.container.present"].status == CheckStatus.FAIL
