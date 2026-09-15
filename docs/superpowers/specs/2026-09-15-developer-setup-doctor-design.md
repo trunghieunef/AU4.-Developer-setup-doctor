@@ -70,6 +70,33 @@ Xây một CLI tool **Developer Setup Doctor** đa nền tảng, kiểm tra **m�
 | **Developer có kinh nghiệm** | Chạy `--fix` để tự động cài deps / tạo `.env` an toàn; dùng JSON để tích hợp CI |
 | **Nhà nghiên cứu / đánh giá** | Chạy `setup-doctor study` trên 10-20 repo thực tế → xuất bảng so sánh flat vs dep |
 
+### 2.1a User stories
+
+**Nhóm 1 — Developer mới (người dùng chính)**
+
+| ID | User story | Tiêu chí chấp nhận |
+|---|---|---|
+| US-1 | Là một developer mới, tôi muốn chạy **một lệnh duy nhất** lên repo vừa clone để biết ngay môi trường còn thiếu gì, để tôi không phải mò mẫm đọc README và thử sai từng lệnh | Chạy `setup-doctor check <repo>` không cần cấu hình trước; output liệt kê rõ mục pass/fail |
+| US-2 | Là một developer mới, tôi muốn thấy **các bước sửa chính xác bằng lệnh cụ thể** (không phải mô tả chung chung) cho từng lỗi, để tôi làm theo được ngay dù chưa rành công cụ | Mỗi check fail đều có `remediation[].command` thực thi được theo OS của tôi |
+| US-3 | Là một developer mới, tôi muốn biết **lỗi nào là gốc rễ và nên sửa trước**, để tôi không sửa nhầm lỗi hệ quả rồi lại gặp lại lỗi cũ | `--mode=dep` (mặc định) xác định root cause + thứ tự sửa qua `chain` |
+| US-4 | Là một developer mới, tôi muốn tool **không tự sửa đổi gì** khi tôi chỉ chạy check, để tôi yên tâm chạy trên máy mà không lo hỏng cấu hình | Chạy check không thay đổi file nào trong repo (AC-5) |
+
+**Nhóm 2 — Developer có kinh nghiệm**
+
+| ID | User story | Tiêu chí chấp nhận |
+|---|---|---|
+| US-5 | Là một developer có kinh nghiệm, tôi muốn dùng `--fix` để tự động cài dependencies / khởi động service / tạo `.env` an toàn có backup, để tiết kiệm thời gian lặp lại trên nhiều máy | `--fix` tạo backup trước khi đổi; log đầy đủ; rollback nếu lỗi (AC-3) |
+| US-6 | Là một developer có kinh nghiệm, tôi muốn lấy **kết quả JSON chuẩn + exit code** để tích hợp vào CI, để pipeline tự chặn build khi môi trường thiếu | `--format json` đúng schema 1.0; exit 1 khi fail, 0 khi pass |
+| US-7 | Là một developer có kinh nghiệm, tôi muốn bật `--ai` để nhận **gợi ý sửa lỗi động theo tình huống** và giải thích nguyên nhân tự nhiên, để tiết kiệm thời gian tra cứu khi gặp lỗi lạ | Bật `--ai`: remediation có `source: "ai"`; khi AI lỗi → fallback giữ nguyên, không crash (AC-7) |
+| US-8 | Là một developer có kinh nghiệm, tôi muốn cấu hình mặc định (mode, AI, format) qua **file config**, để các lần chạy sau khỏi gõ lại đủ cờ | Config file đọc đúng; CLI flag ghi đè (AC-10) |
+
+**Nhóm 3 — Nhà nghiên cứu / đánh giá**
+
+| ID | User story | Tiêu chí chấp nhận |
+|---|---|---|
+| US-9 | Là nhà nghiên cứu, tôi muốn chạy `study` trên danh sách repo với **ground truth đã ghi chú**, để so sánh định lượng hai mode flat vs dep | Harness xuất CSV/JSON kèm precision/recall/accuracy/clarity/f1 (AC-4) |
+| US-10 | Là nhà nghiên cứu, tôi muốn kết quả nghiên cứu **tái lập được**, để kết quả báo cáo của tôi đáng tin cậy | Chạy `study` 2 lần cùng dữ liệu → kết quả giống hệt (AC-8) |
+
 ### 2.2 Yêu cầu chức năng (Functional requirements)
 
 | ID | Yêu cầu | Ưu tiên |
