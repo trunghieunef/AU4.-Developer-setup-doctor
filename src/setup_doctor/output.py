@@ -19,7 +19,9 @@ def render_text(report: Report) -> str:
     if report.diagnosis and report.diagnosis.root_causes:
         lines.append("root causes:")
         for rc in report.diagnosis.root_causes:
-            lines.append(f"  - {rc.cause_check_id}: {rc.message} (chain: {rc.chain})")
+            # ASCII-safe cho console Windows (cp1252 không hiển thị '→')
+            chain = rc.chain.replace(" → ", " -> ")
+            lines.append(f"  - {rc.cause_check_id}: {rc.message} (chain: {chain})")
     lines.append(f"exit_code: {report.exit_code}")
     return "\n".join(lines)
 

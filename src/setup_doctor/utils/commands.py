@@ -21,8 +21,24 @@ def which(name: str) -> str | None:
     return shutil.which(name)
 
 
+def _resolve_cmd_win(cmd: list[str]) -> list[str]:
+    """Trên Windows, script .cmd/.bat KHÔNG chạy được trực tiếp qua CreateProcess
+    (shell=False) -> phải bọc qua ``cmd.exe /c``.
+
+    Phát hiện thật khi test: ``npm`` (npm.cmd), ``yarn``, ``mvn``, ``corepack``
+    đều là .cmd trên Windows nên whitelist fix op sẽ fail nếu không xử lý.
+    """
+    if sys.platform != "win32":
+        return cmd
+    exe = shutil.which(cmd[0])
+    if exe and exe.lower().endswith((".cmd", ".bat")):
+        return ["cmd", "/c", *cmd]
+    return cmd
+
+
 def _run(cmd: list[str], cwd: str | None, timeout: int, env: dict | None) -> CommandResult:
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    cmd = _resolve_cmd_win(cmd)
     proc = subprocess.run(
         cmd, cwd=cwd, capture_output=True, text=True,
         timeout=timeout, env=env, creationflags=creationflags,

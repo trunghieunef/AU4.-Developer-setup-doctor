@@ -37,6 +37,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows console (cp1252) không thể encode ký tự như '→' (U+2192) trong chain
+    # -> reconfigure để in an toàn, không crash khi output text ra terminal.
+    try:
+        sys.stdout.reconfigure(errors="replace")
+        sys.stderr.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass  # không phải stream console hoặc Python cũ hơn 3.7
+
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
