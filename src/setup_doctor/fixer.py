@@ -8,10 +8,6 @@ from .models import Report
 from .utils.commands import run_command
 
 
-class OperationNotAllowedError(Exception):
-    """Op không nằm trong whitelist fix (không được tự chạy)."""
-
-
 # Whitelist op: chỉ những op này mới được tự chạy khi --fix.
 # - argv: lệnh thực thi (list, KHÔNG shell operator).
 # - reversible: True = có thể rollback bằng backup file (chỉ áp dụng cho file
@@ -30,7 +26,8 @@ _WHITELIST_OP: dict[str, dict] = {
     "create-env":         {"argv": None, "reversible": True, "timeout": 5},  # Python: copy .env.example -> .env
     "restore-lockfile":   {"argv": ["npm", "install", "--package-lock-only"], "reversible": False, "timeout": 120},
     "enable-corepack":    {"argv": ["corepack", "enable"], "reversible": False, "timeout": 60},
-    "start-docker":       {"argv": ["start", "", r"C:\Program Files\Docker\Docker\Docker Desktop.exe"],
+    "start-docker":       {"argv": ["powershell", "-NoProfile", "-Command",
+                                     "Start-Process -FilePath 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe'"],
                            "reversible": False, "timeout": 30,
                            "note": "Windows-only; Linux/macOS roadmap"},
 }

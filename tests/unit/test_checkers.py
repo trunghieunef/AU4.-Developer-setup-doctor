@@ -77,6 +77,17 @@ def test_node_missing_npm_is_fail(fake_runner, monkeypatch, tmp_path):
     assert by_id["node.pkgmgr.present"].status == CheckStatus.FAIL
 
 
+def test_node_invalid_package_json_reported(fake_runner, monkeypatch, tmp_path):
+    # package.json tồn tại nhưng JSON lỗi -> check node.package_json.valid FAIL (M2 fix)
+    repo = _node_context(tmp_path, {"package.json": "{ this is not json"})
+    exe = _patch(fake_runner, monkeypatch)
+    fake_runner.set([exe, "--version"], CommandResult(0, "v22.0.0", ""))
+    results = NodeChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    by_id = {r.check_id: r for r in results}
+    assert by_id["node.package_json.valid"].status == CheckStatus.FAIL
+    assert "JSON" in by_id["node.package_json.valid"].evidence or "error" in by_id["node.package_json.valid"].evidence.lower()
+
+
 # ---------------- Python section ----------------
 from setup_doctor.checkers.python_ck import PythonChecker
 

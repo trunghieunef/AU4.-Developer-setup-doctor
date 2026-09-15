@@ -11,6 +11,9 @@ from ..utils.versions import satisfies
 class NodeChecker(Checker):
     id, label, ecosystem = "node", "Node.js", "node"
 
+    def __init__(self):
+        self._pkg_parse_error = None
+
     def _read_json(self, repo, name):
         path = os.path.join(repo, name)
         if not os.path.isfile(path):
@@ -18,7 +21,12 @@ class NodeChecker(Checker):
         try:
             with open(path, encoding="utf-8") as f:
                 return json.load(f)
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError as exc:
+            # Ghi lại lỗi parse để emit check node.package_json.valid (M2 — không silent fail).
+            self._pkg_parse_error = f"{name} JSON error: {exc}"
+            return None
+        except OSError as exc:
+            self._pkg_parse_error = f"{name} read error: {exc}"
             return None
 
     def _required_version(self, repo):
@@ -32,6 +40,17 @@ class NodeChecker(Checker):
 
     def run(self, ctx):
         results = []
+        # M2: nếu package.json tồn tại nhưng JSON lỗi -> báo FAIL thay vì silent pass.
+        self._pkg_parse_error = None
+        self._read_json(ctx.repo_path, "package.json")
+        if self._pkg_parse_error:
+            results.append(CheckResult(
+                check_id="node.package_json.valid", name="package.json valid JSON",
+                ecosystem=self.ecosystem, status=CheckStatus.FAIL,
+                evidence=self._pkg_parse_error,
+                remediation=[RemediationStep("Fix package.json syntax", "", safe_fix=False)],
+            ))
+
         node_exe = which("node")
         present = node_exe is not None
         version = ""

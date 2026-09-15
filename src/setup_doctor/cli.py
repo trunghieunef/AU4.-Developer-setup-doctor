@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import json
+import os
 import sys
 from . import __version__
 from .config import load_config
@@ -42,6 +43,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "check":
             return _cmd_check(args)
         if args.command == "study":
+            if not os.path.isfile(args.repos_file):
+                print(f"setup-doctor: repos file not found: {args.repos_file}", file=sys.stderr)
+                return 2
             run_study(args.repos_file, args.ground_truth, args.output_dir)
             return 0
     except NoEcosystemError as exc:
@@ -63,12 +67,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _emit_no_ecosystem(args, repo_path: str) -> None:
-    """No-ecosystem: vẫn tôn trọng --format json để không phá vỡ machine-readable."""
+    """No-ecosystem: vẫn tôn trọng --format json và xuất đúng schema Report (kể cả JSON)."""
     fmt = getattr(args, "format", None)
     if fmt == "json":
         payload = json.dumps({
             "schema_version": "1.0",
             "repo_path": repo_path,
+            "summary": {"total": 0, "pass": 0, "fail": 0, "skip": 0, "warnings": 0},
+            "checks": [],
             "message": "no supported ecosystem detected",
             "exit_code": 0,
         }, indent=2, ensure_ascii=False)
@@ -85,6 +91,14 @@ def _cmd_check(args) -> int:
     })
     mode = args.mode or config.default_mode
     report = run_check(args.repo_path, mode, config, ai_enabled=bool(config.ai.enabled))
+    if args.fix:
+        fix = Fixer(args.repo_path).apply(report)
+        if args.verbose:
+            for e in fix.entries:
+                print(f"fix: {e.status} -> {e.command} {e.detail}")
+        # AC-3 / spec data flow 3.3: sau khi fix phải chạy lại checks để lấy trạng thái cuối
+        # (exit code phản ánh kết quả SAU fix, không phải trước fix).
+        report = run_check(args.repo_path, mode, config, ai_enabled=bool(config.ai.enabled))
     use_json = args.format == "json" or (args.format is None and config.output_format == "json")
     if use_json:
         payload = render_json(report)
@@ -95,11 +109,6 @@ def _cmd_check(args) -> int:
             print(payload)
     else:
         print(render_text(report))
-    if args.fix:
-        fix = Fixer(args.repo_path).apply(report)
-        if args.verbose:
-            for e in fix.entries:
-                print(f"fix: {e.status} -> {e.command} {e.detail}")
     return report.exit_code
 
 

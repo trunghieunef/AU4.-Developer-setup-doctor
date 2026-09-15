@@ -5,6 +5,7 @@ import json
 CATALOG_CHECK_IDS = {
     "node.runtime.present", "node.sdk.version", "node.pkgmgr.present",
     "node.lockfile.exists", "node.deps.installed", "node.build.ready",
+    "node.package_json.valid",
     "python.runtime.present", "python.version", "python.env.present",
     "python.deps.installed", "python.build.ready",
     "java.runtime.present", "java.version", "java.maven.gradle.present",
