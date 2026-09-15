@@ -27,7 +27,7 @@ pip install -e ".[ai]"         # thêm hỗ trợ AI (openai/anthropic)
 setup-doctor check <repo>                  # chẩn đoán (mặc định mode=dep, text)
 setup-doctor check <repo> --mode flat      # checklist phẳng
 setup-doctor check <repo> --format json    # JSON machine-readable
-setup-doctor check <repo> --output report.json  # ghi JSON ra file
+setup-doctor check <repo> --format json --output report.json  # ghi JSON ra file
 setup-doctor check <repo> --fix            # áp dụng remediation an toàn (có backup)
 setup-doctor check <repo> --ai             # tăng cường AI (cần SETUP_DOCTOR_API_KEY)
 setup-doctor study repos.txt --ground-truth research/ground_truth --output-dir research/output
