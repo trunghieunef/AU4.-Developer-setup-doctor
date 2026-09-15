@@ -180,3 +180,47 @@ def test_java_runtime_version_fails_is_error(fake_runner, monkeypatch, tmp_path)
     # runtime fail là gốc; downstream (maven/gradle, deps.cached) cũng fail theo
     assert by_id["java.runtime.present"].status == CheckStatus.FAIL
     assert by_id["java.version"].status == CheckStatus.SKIP  # bị skip vì runtime hỏng
+
+
+# ---------------- .NET section ----------------
+from setup_doctor.checkers.dotnet_ck import DotnetChecker
+
+
+def _dotnet_patch(fake_runner, monkeypatch):
+    monkeypatch.setattr("setup_doctor.checkers.dotnet_ck.which",
+                        lambda name: "C:\\dotnet\\dotnet.exe" if name == "dotnet" else None)
+    monkeypatch.setattr("setup_doctor.checkers.dotnet_ck.run_command", fake_runner)
+    monkeypatch.setattr("setup_doctor.checkers.dotnet_ck._nuget_cache_ok", lambda: True)
+    return "C:\\dotnet\\dotnet.exe"
+
+
+def test_dotnet_pass(fake_runner, monkeypatch, tmp_path):
+    repo = _node_context(tmp_path, {"global.json": '{"sdk": {"version": "8.0.100"}}', "App.csproj": "<Project Sdk=\"Microsoft.NET.Sdk\" />"})
+    exe = _dotnet_patch(fake_runner, monkeypatch)
+    fake_runner.set([exe, "--list-sdks"], CommandResult(0, "8.0.100 [C:\\dotnet\\sdk]", ""))
+    results = DotnetChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    assert {r.check_id for r in results if r.status == CheckStatus.FAIL} == set()
+    # cache có -> restore.ready là warning (pass nhưng severity warning)
+    ready = next(r for r in results if r.check_id == "dotnet.restore.ready")
+    assert ready.severity == Severity.WARNING
+
+
+def test_dotnet_fail_missing_sdk(fake_runner, monkeypatch, tmp_path):
+    repo = _node_context(tmp_path, {"global.json": '{"sdk": {"version": "9.0.100"}}', "App.csproj": "<Project Sdk=\"Microsoft.NET.Sdk\" />"})
+    exe = _dotnet_patch(fake_runner, monkeypatch)
+    fake_runner.set([exe, "--list-sdks"], CommandResult(0, "8.0.100 [C:\\dotnet\\sdk]", ""))
+    results = DotnetChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    assert {r.check_id for r in results if r.status == CheckStatus.FAIL} == {"dotnet.sdk.version"}
+
+
+def test_dotnet_cli_list_fails_is_error(fake_runner, monkeypatch, tmp_path):
+    repo = _node_context(tmp_path, {"App.csproj": "<Project Sdk=\"Microsoft.NET.Sdk\" />"})
+    exe = "C:\\dotnet\\dotnet.exe"
+    monkeypatch.setattr("setup_doctor.checkers.dotnet_ck.which",
+                        lambda name: exe if name == "dotnet" else None)
+    monkeypatch.setattr("setup_doctor.checkers.dotnet_ck.run_command", fake_runner)
+    fake_runner.set([exe, "--list-sdks"], CommandResult(1, "", "error"))
+    results = DotnetChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    by_id = {r.check_id: r for r in results}
+    assert by_id["dotnet.runtime.present"].status == CheckStatus.FAIL
+    assert by_id["dotnet.sdk.version"].status == CheckStatus.SKIP
