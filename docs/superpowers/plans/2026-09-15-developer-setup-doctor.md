@@ -6,7 +6,7 @@
 
 **Architecture:** Plugin-style checker framework in Python 3.11+. Each ecosystem (node, python, java, dotnet, services, registry) is one read-only `Checker` class returning normalized `CheckResult` objects. A `DiagnosisEngine` consumes the same check results in two modes: `flat` (plain checklist) and `dep` (builds a DAG from `depends_on`, groups failures by root cause). Output layer renders text/JSON and computes exit codes. A `Fixer` applies only whitelisted `safe_fix` remediations with transactional backup + log + rollback. AI is an optional enhancement layer (`--ai`) with a provider interface and always-available rule-based fallback; the `study` harness is strictly rule-based/deterministic.
 
-**Revision note (v1.2, sau review):** plan đã được sửa theo review:
+**Revision note (v1.2, sau review round 1):** plan đã được sửa theo review:
 - Checkers **read-only**: không chạy `mvn dependency:resolve`/`dotnet restore`/build trong check; thay bằng kiểm tra static (cache dir, parse file). Các op tải deps chỉ ở `--fix`.
 - ID check chuẩn hóa theo catalog spec 3.7: `*.deps.*`, `*.build.ready`, `*.restore.ready`, `*.deps.cached`...
 - Registry: git user/SSH là **warning**; chỉ chạy khi repo có dấu hiệu cần; SSH skip khi remote HTTPS.
@@ -14,6 +14,16 @@
 - Config: tự tìm file (cwd → repo root → home); `--ai` ba trạng thái None/True/False.
 - AI: sanitize evidence, quota chung, validate schema.
 - Metrics: accuracy trên universe nhãn; path không tồn tại → exit 2.
+
+**Revision note (v1.3, sau review round 2):**
+- Version parser: test `~20.4.0` đúng (loại 20.5.0); `>=18 || >=22` với 19.0.0 pass; `satisfies` trả `None` khi unsupported → checker báo **warning/skip**, không fail sai.
+- DAG engine: `causes: list[str]` (mọi root causes) + `caused_by` (primary); `_failed_roots_of` xử lý multi-dep fail, skip-bridge, cycle, missing ID; có test cho từng edge case.
+- Fixer: **hạ cam kết rollback** — whitelist op có `reversible` flag; npm ci/mvn/dotnet/docker là **non-reversible** (log rõ, không hứa khôi phục); bỏ xóa mọi path mới tạo nguy hiểm; chặn path traversal qua `_is_inside_repo`.
+- Data model: tách `operation` + `argv` + `command`(display) trong `RemediationStep`; whitelist theo operation, không so khớp chuỗi hiển thị.
+- Checker semantics: runtime có trong PATH nhưng `--version`/`--list-sdks` fail → FAIL; npm/docker thiếu (repo cần) → FAIL (không skip); `.venv` phải có `pyvenv.cfg`; deps fail khi thiếu venv (không pass giả); compose so container name theo prefix.
+- Cache check: `.m2`/`.nuget` tồn tại → **warning** (không chứng minh deps repo sẵn sàng), thiếu → FAIL.
+- Metrics: chốt quy tắc universe — ID trong ground truth LUÔN thuộc universe; tool không emit → FN; validate_ground_truth reject ID ngoài catalog; nêu rõ flat/dep KHÔNG khác nhau ở precision/recall (so sánh qua clarity + remediation_order thủ công).
+- Nhỏ: entry-point registry có fallback import trực tiếp khi metadata rỗng; AC-9 chốt schema duy nhất (`ai_explanation` null/string); NFR-3 phân biệt timeout check (30s) vs fix op (timeout riêng); sửa số test count.
 
 **Tech Stack:** Python ≥3.11, stdlib + PyYAML for core (`argparse`, `tomllib`, `dataclasses`, `subprocess`, `socket`), `pytest` for tests, optional `openai`/`anthropic` for AI, `setuptools` packaging with `pyproject.toml` + entry points (checker plugin registry).
 
@@ -47,8 +57,9 @@ src/setup_doctor/utils/osdetect.py      # detect_os
 src/setup_doctor/ai/provider.py         # AIProvider protocol, OpenAI/Anthropic clients, get_provider
 src/setup_doctor/ai/remediation.py      # AIRemediation
 src/setup_doctor/ai/explainer.py        # AIExplainer
-src/setup_doctor/study/metrics.py       # compute_metrics
-src/setup_doctor/study/runner.py        # run_study
+src/setup_doctor/study/metrics.py       # compute_metrics trên universe (TP/FP/FN/TN)
+src/setup_doctor/study/ground_truth.py  # validate_ground_truth: reject ID ngoài catalog
+src/setup_doctor/study/runner.py        # run_study: chạy cả 2 mode, xuất CSV/JSON
 src/setup_doctor/cli.py                 # argparse main()
 tests/conftest.py                       # FakeRunner + patch helpers, fixture seed builders
 tests/unit/test_models.py
@@ -100,13 +111,25 @@ def test_check_result_to_dict_uses_enum_values():
     assert d["severity"] == "error"          # enum value, not enum object
     assert d["status"] == "fail"
     assert d["caused_by"] is None
+    assert d["causes"] == []
     assert d["remediation"][0] == {
         "step": "Install Node 22",
         "command": "nvm install 22",
         "safe_fix": True,
         "source": "manual",
         "files": [],
+        "operation": None,
+        "argv": None,
     }
+
+
+def test_remediation_step_with_operation_and_argv():
+    step = RemediationStep("Install deps", "npm ci", safe_fix=True,
+                           operation="install-node-deps", argv=["npm", "ci"])
+    d = step.to_dict()
+    assert d["operation"] == "install-node-deps"
+    assert d["argv"] == ["npm", "ci"]
+
 
 def test_report_to_dict_nested_objects():
     rc = RootCause("node.sdk.version", "msg", ["a", "b"], "a → b")
@@ -198,10 +221,12 @@ class Severity(str, Enum):
 @dataclass
 class RemediationStep:
     step: str
-    command: str
+    command: str = ""                    # display_command cho người dùng (vd "npm ci")
     safe_fix: bool = False
     source: str = "manual"
-    files: list[str] = field(default_factory=list)  # repo-relative files to back up before running
+    files: list[str] = field(default_factory=list)  # repo-relative files để backup trước khi run
+    operation: str | None = None         # whitelist op key ("install-node-deps", "create-env"...); None = chỉ hiển thị, KHÔNG tự fix
+    argv: list[str] | None = None        # argv list cụ thể cho op (ưu tiên hơn command khi fix)
 
     def to_dict(self) -> dict:
         return {
@@ -210,6 +235,8 @@ class RemediationStep:
             "safe_fix": self.safe_fix,
             "source": self.source,
             "files": list(self.files),
+            "operation": self.operation,
+            "argv": list(self.argv) if self.argv is not None else None,
         }
 
 
@@ -223,7 +250,8 @@ class CheckResult:
     evidence: str = ""
     remediation: list[RemediationStep] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)
-    caused_by: str | None = None
+    caused_by: str | None = None         # dep mode: primary root cause (first)
+    causes: list[str] = field(default_factory=list)  # dep mode: TẤT CẢ root causes gây ra check này
 
     def to_dict(self) -> dict:
         return {
@@ -236,6 +264,7 @@ class CheckResult:
             "remediation": [r.to_dict() for r in self.remediation],
             "depends_on": list(self.depends_on),
             "caused_by": self.caused_by,
+            "causes": list(self.causes),
         }
 
 
@@ -346,21 +375,24 @@ def test_satisfies_semver():
     assert satisfies("21.0.2", "21")
     assert satisfies("22.1.0", "^20.0.0")
     assert not satisfies("19.0.0", "^20.0.0")
-    assert satisfies("20.5.0", "~20.4.0")   # 20.4.x <= v < 20.5
+    assert not satisfies("20.5.0", "~20.4.0")   # ~20.4.0 = >=20.4.0, <20.5.0 -> 20.5.0 KHÔNG thỏa
+    assert satisfies("20.4.9", "~20.4.0")
     assert not satisfies("20.6.0", "~20.4.0")
     assert satisfies("18.0.0", "<20.0.0")
     assert not satisfies("20.0.0", "<20.0.0")
     assert satisfies("20.0.0", "<=20.0.0")
     assert satisfies("19.0.0", ">18.0.0")
-    assert satisfies("22.1.0", ">=20 <23")          # khoảng
+    assert satisfies("22.1.0", ">=20 <23")          # khoảng: 20 <= v < 23
     assert not satisfies("23.1.0", ">=20 <23")
     assert satisfies("20.0.0", ">=18.0.0 || >=22.0.0")
-    assert not satisfies("19.0.0", ">=18.0.0 || >=22.0.0")
+    assert satisfies("19.0.0", ">=18.0.0 || >=22.0.0")  # 19 >= 18 -> thỏa vế trái
 
 
-def test_satisfies_unknown_constraint_warns():
-    # constraint không hỗ trợ (vd "lts/*") -> không fail sai, trả False + cờ
-    assert satisfies("20.0.0", "lts/*") is False
+def test_satisfies_unsupported_constraint_returns_none():
+    # constraint không hỗ trợ (vd "lts/*") -> trả None, KHÔNG fail sai
+    assert satisfies("20.0.0", "lts/*") is None
+    assert satisfies("20.0.0", "~dev") is None
+    assert satisfies("", ">=20") is None          # không parse được version -> None
 
 
 def test_parse_version_extracts_numbers():
@@ -444,26 +476,40 @@ def parse_version(s: str) -> tuple[int, ...]:
     return tuple(int(p) for p in match.group(1).split("."))
 
 
-def satisfies(installed: str, constraint: str) -> bool:
+def satisfies(installed: str, constraint: str) -> bool | None:
     """Check an installed version string against a constraint.
 
     Hỗ trợ: ``>=X``, ``>X``, ``<X``, ``<=X``, ``^X`` (major-pinned),
     ``~X.Y.Z`` (patch-pinned), khoảng ``a b``, và ``a || b`` (OR).
-    Constraint không parse được -> trả False (không fail sai theo cách khác).
+
+    Trả về:
+    - ``True``/``False`` nếu constraint hợp lệ.
+    - ``None`` nếu **không xác định được** (constraint không hỗ trợ, hoặc
+      version không parse được) — caller KHÔNG được coi là fail; phải báo
+      ``skip``/``warning`` để tránh fail sai.
     """
     iv = parse_version(installed)
     if not iv:
-        return False
+        return None
     c = constraint.strip()
-    if not c or c.lower() in ("*", "latest", "lts/*"):
-        return False  # không ràng buộc khả thi để so sánh -> báo như chưa xác định
+    if not c or c.lower() in ("*", "latest", "x", "X"):
+        return None  # không ràng buộc khả thi để so sánh -> chưa xác định
+    if "lts" in c.lower() or "/" in c:
+        return None  # dạng alias (lts/*, node/*...) -> chưa xác định
     # OR
     if "||" in c:
-        return any(satisfies(installed, part) for part in c.split("||"))
+        results = [satisfies(installed, part.strip()) for part in c.split("||")]
+        # nếu có vế None (unsupported) -> không thể kết luận chắc chắn -> None
+        if any(r is None for r in results):
+            return None
+        return any(results)
     # khoảng cách (nhiều ràng buộc, cách nhau khoảng trắng)
     parts = c.split()
     if len(parts) > 1:
-        return all(satisfies(installed, p) for p in parts)
+        results = [satisfies(installed, p) for p in parts]
+        if any(r is None for r in results):
+            return None
+        return all(results)
     single = parts[0]
     # khử dấu v ở đầu
     single = single.lstrip("vV")
@@ -477,15 +523,21 @@ def satisfies(installed: str, constraint: str) -> bool:
         return iv < parse_version(single[1:])
     if single.startswith("^"):
         cv = parse_version(single[1:])
-        return bool(cv) and iv[0] == cv[0] and iv >= cv
+        if not cv:
+            return None
+        return iv[0] == cv[0] and iv >= cv
     if single.startswith("~"):
         cv = parse_version(single[1:])
+        if not cv:
+            return None
         # ~X.Y.Z -> >= X.Y.Z, < X.(Y+1).0
         if len(cv) >= 2:
             return iv >= cv and iv < (cv[0], cv[1] + 1, 0)
-        return bool(cv) and iv >= cv
+        return iv >= cv
     cv = parse_version(single)
-    return bool(cv) and iv >= cv  # plain major = minimum major
+    if not cv:
+        return None  # không parse được constraint (vd "~dev") -> chưa xác định
+    return iv >= cv  # plain major = minimum major
 ```
 
 ```python
@@ -833,9 +885,27 @@ def detect_ecosystems(repo_path: str) -> set[str]:
 
 
 def _load_checker_classes() -> list[type]:
-    """Nạp tất cả checker class đã đăng ký qua entry points."""
-    eps = metadata.entry_points(group=_ENTRY_POINT_GROUP) if hasattr(metadata, "entry_points") else metadata.entry_points().select(group=_ENTRY_POINT_GROUP)
-    return [ep.load() for ep in eps]
+    """Nạp tất cả checker class đã đăng ký qua entry points.
+
+    Fallback: nếu entry points rỗng (vd chạy unit test trước khi cài editable,
+    hoặc môi trường không có metadata) → import trực tiếp danh sách built-in,
+    để test/CLI vẫn chạy được (điểm review "entry point plugin").
+    """
+    try:
+        eps = metadata.entry_points(group=_ENTRY_POINT_GROUP) if hasattr(metadata, "entry_points") else metadata.entry_points().select(group=_ENTRY_POINT_GROUP)
+        classes = [ep.load() for ep in eps]
+        if classes:
+            return classes
+    except Exception:
+        pass  # fallback bên dưới
+    from .checkers.node import NodeChecker
+    from .checkers.python_ck import PythonChecker
+    from .checkers.java import JavaChecker
+    from .checkers.dotnet_ck import DotnetChecker
+    from .checkers.services import ServicesChecker
+    from .checkers.registry import RegistryChecker
+    return [NodeChecker, PythonChecker, JavaChecker, DotnetChecker,
+            ServicesChecker, RegistryChecker]
 
 
 def get_checkers(ecosystems: set[str]) -> list:
@@ -1021,29 +1091,31 @@ class NodeChecker(Checker):
         results = []
         node_exe = which("node")
         present = node_exe is not None
+        version = ""
+        version_ok = True
+        if present:
+            res = run_command([node_exe, "--version"], timeout=10)
+            version = res.stdout
+            version_ok = res.ok and bool(version)  # exe có trong PATH nhưng --version fail -> FAIL (điểm #5)
         results.append(CheckResult(
             check_id="node.runtime.present",
             name="Node.js runtime present",
             ecosystem=self.ecosystem,
-            status=CheckStatus.PASS if present else CheckStatus.FAIL,
-            evidence=f"node found at {node_exe}" if present else "node not found in PATH",
-            remediation=[] if present else [
-                RemediationStep("Install Node.js LTS",
-                                "winget install OpenJS.NodeJS.LTS", safe_fix=False),
+            status=CheckStatus.PASS if (present and version_ok) else CheckStatus.FAIL,
+            evidence=f"node {version} at {node_exe}" if (present and version_ok)
+                     else ("node found but --version failed" if present else "node not found in PATH"),
+            remediation=[] if (present and version_ok) else [
+                RemediationStep("Install/uninstall Node.js LTS", "winget install OpenJS.NodeJS.LTS",
+                                safe_fix=False),
             ],
         ))
 
-        version = ""
-        if present:
-            res = run_command([node_exe, "--version"], timeout=10)
-            version = res.stdout
-
         required = self._required_version(ctx.repo_path)
-        if not present:
+        if not present or not version_ok:
             results.append(CheckResult(
                 check_id="node.sdk.version", name="Node.js SDK version",
                 ecosystem=self.ecosystem, status=CheckStatus.SKIP,
-                evidence="skipped: runtime not present",
+                evidence="skipped: runtime not working",
                 depends_on=["node.runtime.present"],
             ))
         elif required is None:
@@ -1055,26 +1127,41 @@ class NodeChecker(Checker):
             ))
         else:
             ok = satisfies(version, required)
-            results.append(CheckResult(
-                check_id="node.sdk.version", name="Node.js SDK version",
-                ecosystem=self.ecosystem,
-                status=CheckStatus.PASS if ok else CheckStatus.FAIL,
-                evidence=f"node {version} expected {required}",
-                remediation=[] if ok else [
-                    RemediationStep("Install the required Node version", "nvm install 22", safe_fix=False),
-                    RemediationStep("Switch to it", "nvm use 22", safe_fix=False),
-                ],
-                depends_on=["node.runtime.present"],
-            ))
+            if ok is None:
+                # Constraint không hỗ trợ/không parse được -> KHÔNG fail sai; báo warning
+                results.append(CheckResult(
+                    check_id="node.sdk.version", name="Node.js SDK version",
+                    ecosystem=self.ecosystem, severity=Severity.WARNING,
+                    status=CheckStatus.FAIL,
+                    evidence=f"node {version}; cannot evaluate constraint '{required}'",
+                    remediation=[RemediationStep("Check the required engine manually",
+                                                 "", safe_fix=False)],
+                    depends_on=["node.runtime.present"],
+                ))
+            else:
+                results.append(CheckResult(
+                    check_id="node.sdk.version", name="Node.js SDK version",
+                    ecosystem=self.ecosystem,
+                    status=CheckStatus.PASS if ok else CheckStatus.FAIL,
+                    evidence=f"node {version} expected {required}",
+                    remediation=[] if ok else [
+                        RemediationStep("Install the required Node version", "nvm install 22", safe_fix=False),
+                        RemediationStep("Switch to it", "nvm use 22", safe_fix=False),
+                    ],
+                    depends_on=["node.runtime.present"],
+                ))
 
         npm_exe = which("npm")
+        # npm thiếu trong repo Node -> FAIL (prerequisite thiếu), không phải SKIP (điểm #5)
         results.append(CheckResult(
             check_id="node.pkgmgr.present", name="npm present",
             ecosystem=self.ecosystem,
-            status=CheckStatus.PASS if npm_exe else CheckStatus.SKIP,
-            evidence=f"npm at {npm_exe}" if npm_exe else "npm not found",
+            status=CheckStatus.PASS if npm_exe else CheckStatus.FAIL,
+            evidence=f"npm at {npm_exe}" if npm_exe else "npm not found in PATH",
             remediation=[] if npm_exe else [
-                RemediationStep("Enable corepack/npm", "corepack enable", safe_fix=False),
+                RemediationStep("Enable corepack/npm", "corepack enable",
+                                safe_fix=False, operation="enable-corepack",
+                                argv=["corepack", "enable"]),
             ],
             depends_on=["node.runtime.present"],
         ))
@@ -1087,7 +1174,9 @@ class NodeChecker(Checker):
             status=CheckStatus.PASS if lockfile else CheckStatus.FAIL,
             evidence=f"found {lockfile}" if lockfile else "no lockfile found",
             remediation=[] if lockfile else [
-                RemediationStep("Generate lockfile", "npm install --package-lock-only", safe_fix=False),
+                RemediationStep("Generate lockfile", "npm install --package-lock-only",
+                                safe_fix=True, operation="restore-lockfile",
+                                argv=["npm", "install", "--package-lock-only"]),
             ],
             depends_on=["node.pkgmgr.present"],
         ))
@@ -1099,7 +1188,9 @@ class NodeChecker(Checker):
             status=CheckStatus.PASS if node_modules_ok else CheckStatus.FAIL,
             evidence="node_modules present" if node_modules_ok else "node_modules missing",
             remediation=[] if node_modules_ok else [
-                RemediationStep("Install dependencies from lockfile", "npm ci", safe_fix=True),
+                RemediationStep("Install dependencies from lockfile", "npm ci",
+                                safe_fix=True, operation="install-node-deps",
+                                argv=["npm", "ci"]),
             ],
             depends_on=["node.lockfile.exists", "node.sdk.version"],
         ))
@@ -1124,7 +1215,9 @@ class NodeChecker(Checker):
                 status=CheckStatus.PASS if tool_ok else CheckStatus.FAIL,
                 evidence=f"build tool '{tool}' resolvable" if tool_ok else f"build tool '{tool}' not resolvable",
                 remediation=[] if tool_ok else [
-                    RemediationStep("Reinstall dependencies", "npm ci", safe_fix=True),
+                    RemediationStep("Reinstall dependencies", "npm ci",
+                                    safe_fix=True, operation="install-node-deps",
+                                    argv=["npm", "ci"]),
                 ],
                 depends_on=["node.deps.installed"],
             ))
@@ -1160,7 +1253,9 @@ from setup_doctor.checkers.python_ck import PythonChecker
 
 def test_python_pass(fake_runner, monkeypatch, tmp_path):
     repo = _node_context(tmp_path, {"pyproject.toml": '[project]\nrequires-python = ">=3.11"\n'})
+    # .venv phải có pyvenv.cfg mới hợp lệ (điểm #5)
     (repo / ".venv").mkdir()
+    (repo / ".venv" / "pyvenv.cfg").write_text("home = C:\\Python\\3.12\n", encoding="utf-8")
     fake_runner.set(["py", "--version"], CommandResult(0, "Python 3.12.1", ""))
     monkeypatch.setattr("setup_doctor.checkers.python_ck.which",
                         lambda name: "C:\\Python\\py.exe" if name == "py" else None)
@@ -1180,6 +1275,33 @@ def test_python_fail_version(fake_runner, monkeypatch, tmp_path):
     monkeypatch.setattr("setup_doctor.checkers.python_ck.run_command", fake_runner)
     results = PythonChecker().run(CheckContext(repo_path=str(repo), os="windows"))
     assert {r.check_id for r in results if r.status == CheckStatus.FAIL} == {"python.version"}
+
+
+def test_python_runtime_version_fails_is_error(fake_runner, monkeypatch, tmp_path):
+    repo = _node_context(tmp_path, {"pyproject.toml": '[project]\nrequires-python = ">=3.11"\n'})
+    fake_runner.set(["py", "--version"], CommandResult(1, "", "python: error"))
+    monkeypatch.setattr("setup_doctor.checkers.python_ck.which",
+                        lambda name: "C:\\Python\\py.exe" if name == "py" else None)
+    monkeypatch.setattr("setup_doctor.checkers.python_ck.run_command", fake_runner)
+    results = PythonChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    by_id = {r.check_id: r for r in results}
+    assert by_id["python.runtime.present"].status == CheckStatus.FAIL
+
+
+def test_python_deps_fail_when_venv_missing(fake_runner, monkeypatch, tmp_path):
+    # Có requirements.txt nhưng không có .venv -> deps phải FAIL (không PASS vì không kiểm tra được)
+    repo = _node_context(tmp_path, {
+        "pyproject.toml": '[project]\nrequires-python = ">=3.11"\n',
+        "requirements.txt": "requests==2.31.0\n",
+    })
+    fake_runner.set(["py", "--version"], CommandResult(0, "Python 3.12.1", ""))
+    monkeypatch.setattr("setup_doctor.checkers.python_ck.which",
+                        lambda name: "C:\\Python\\py.exe" if name == "py" else None)
+    monkeypatch.setattr("setup_doctor.checkers.python_ck.run_command", fake_runner)
+    results = PythonChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    by_id = {r.check_id: r for r in results}
+    assert by_id["python.env.present"].status == CheckStatus.FAIL
+    assert by_id["python.deps.installed"].status == CheckStatus.FAIL
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1219,27 +1341,29 @@ class PythonChecker(Checker):
         results = []
         py_exe = which("py") or which("python")
         present = py_exe is not None
+        version = ""
+        version_ok = True
+        if present:
+            res = run_command([py_exe, "--version"], timeout=10)
+            version = res.stdout
+            version_ok = res.ok and bool(version)  # exe có nhưng --version fail -> FAIL (#5)
         results.append(CheckResult(
             check_id="python.runtime.present", name="Python runtime present",
             ecosystem=self.ecosystem,
-            status=CheckStatus.PASS if present else CheckStatus.FAIL,
-            evidence=f"python at {py_exe}" if present else "no python/py found in PATH",
-            remediation=[] if present else [
+            status=CheckStatus.PASS if (present and version_ok) else CheckStatus.FAIL,
+            evidence=f"python {version} at {py_exe}" if (present and version_ok)
+                     else ("python found but --version failed" if present else "no python/py found in PATH"),
+            remediation=[] if (present and version_ok) else [
                 RemediationStep("Install Python", "winget install Python.Python.3.12", safe_fix=False),
             ],
         ))
 
-        version = ""
-        if present:
-            res = run_command([py_exe, "--version"], timeout=10)
-            version = res.stdout
-
         required = self._required_version(ctx.repo_path)
-        if not present:
+        if not present or not version_ok:
             results.append(CheckResult(
                 check_id="python.version", name="Python version",
                 ecosystem=self.ecosystem, status=CheckStatus.SKIP,
-                evidence="skipped: runtime not present",
+                evidence="skipped: runtime not working",
                 depends_on=["python.runtime.present"],
             ))
         elif required is None:
@@ -1251,17 +1375,28 @@ class PythonChecker(Checker):
             ))
         else:
             ok = satisfies(version, required)
-            results.append(CheckResult(
-                check_id="python.version", name="Python version",
-                ecosystem=self.ecosystem,
-                status=CheckStatus.PASS if ok else CheckStatus.FAIL,
-                evidence=f"found {version} expected {required}",
-                remediation=[] if ok else [
-                    RemediationStep("Install the required Python version",
-                                    "py -3.12", safe_fix=False),
-                ],
-                depends_on=["python.runtime.present"],
-            ))
+            if ok is None:
+                # Constraint không hỗ trợ -> warning, KHÔNG fail sai (#1)
+                results.append(CheckResult(
+                    check_id="python.version", name="Python version",
+                    ecosystem=self.ecosystem, severity=Severity.WARNING,
+                    status=CheckStatus.FAIL,
+                    evidence=f"found {version}; cannot evaluate '{required}'",
+                    remediation=[RemediationStep("Check requires-python manually", "", safe_fix=False)],
+                    depends_on=["python.runtime.present"],
+                ))
+            else:
+                results.append(CheckResult(
+                    check_id="python.version", name="Python version",
+                    ecosystem=self.ecosystem,
+                    status=CheckStatus.PASS if ok else CheckStatus.FAIL,
+                    evidence=f"found {version} expected {required}",
+                    remediation=[] if ok else [
+                        RemediationStep("Install the required Python version",
+                                        "py -3.12", safe_fix=False),
+                    ],
+                    depends_on=["python.runtime.present"],
+                ))
 
         venv_dir = os.path.join(ctx.repo_path, ".venv")
         venv_ok = os.path.isfile(os.path.join(venv_dir, "pyvenv.cfg"))
@@ -1269,10 +1404,11 @@ class PythonChecker(Checker):
             check_id="python.env.present", name="Virtual env present",
             ecosystem=self.ecosystem,
             status=CheckStatus.PASS if venv_ok else CheckStatus.FAIL,
-            evidence=".venv with pyvenv.cfg present" if venv_ok else ".venv missing",
+            evidence=".venv with pyvenv.cfg present" if venv_ok else ".venv missing or invalid (no pyvenv.cfg)",
             remediation=[] if venv_ok else [
                 RemediationStep("Create a virtual environment", "py -m venv .venv",
-                                safe_fix=True, files=[".venv"]),
+                                safe_fix=True, operation="create-venv",
+                                argv=["py", "-m", "venv", ".venv"], files=[".venv"]),
             ],
             depends_on=["python.runtime.present"],
         ))
@@ -1285,18 +1421,30 @@ class PythonChecker(Checker):
                 evidence="no requirements.txt; skipping",
                 depends_on=["python.env.present"],
             ))
+        elif not venv_ok:
+            # Có requirements nhưng thiếu venv -> không kiểm tra được -> FAIL (không báo pass giả)
+            results.append(CheckResult(
+                check_id="python.deps.installed", name="Dependencies installed",
+                ecosystem=self.ecosystem, status=CheckStatus.FAIL,
+                evidence="cannot check deps: venv missing (fix python.env.present first)",
+                remediation=[RemediationStep("Create venv then install deps", "py -m venv .venv && pip install -r requirements.txt",
+                                             safe_fix=False)],
+                depends_on=["python.env.present"],
+            ))
         else:
             reqs = [ln.strip() for ln in open(req_path, encoding="utf-8")
                     if ln.strip() and not ln.startswith("#")]
-            pip = os.path.join(venv_dir, "Scripts", "pip.exe") if venv_ok else None
+            pip = os.path.join(venv_dir, "Scripts", "pip.exe") if os.name == "nt" else os.path.join(venv_dir, "bin", "pip")
             missing: list[str] = []
-            if pip:
+            if pip and os.path.isfile(pip):
                 res = run_command([pip, "list"], timeout=30)
                 installed = res.stdout.lower()
                 for r in reqs:
                     pkg = re.split(r"[<>=!~\[;]", r)[0].strip()
                     if pkg and pkg.lower() not in installed:
                         missing.append(pkg)
+            else:
+                missing = ["<venv missing pip>"]
             results.append(CheckResult(
                 check_id="python.deps.installed", name="Dependencies installed",
                 ecosystem=self.ecosystem,
@@ -1304,7 +1452,8 @@ class PythonChecker(Checker):
                 evidence=f"missing: {', '.join(missing)}" if missing else "requirements satisfied",
                 remediation=[] if not missing else [
                     RemediationStep("Install dependencies", "pip install -r requirements.txt",
-                                    safe_fix=True),
+                                    safe_fix=True, operation="install-python-deps",
+                                    argv=["pip", "install", "-r", "requirements.txt"]),
                 ],
                 depends_on=["python.env.present"],
             ))
@@ -1329,7 +1478,7 @@ class PythonChecker(Checker):
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/unit/test_checkers.py -k python -v`
-Expected: 2 PASSED
+Expected: 4 PASSED  # pass, fail_version, runtime_version_fails, deps_fail_when_venv_missing
 
 - [ ] **Step 5: Commit**
 
@@ -1360,7 +1509,11 @@ def test_java_pass(fake_runner, monkeypatch, tmp_path):
     monkeypatch.setattr("setup_doctor.checkers.java.run_command", fake_runner)
     monkeypatch.setattr("setup_doctor.checkers.java._m2_cache_exists", lambda home: True)
     results = JavaChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    # cache có -> java.deps.cached là WARNING (pass nhưng severity warning)
     assert {r.check_id for r in results if r.status == CheckStatus.FAIL} == set()
+    cached = next(r for r in results if r.check_id == "java.deps.cached")
+    assert cached.severity == Severity.WARNING
+    assert cached.status == CheckStatus.PASS
 
 
 def test_java_fail_version(fake_runner, monkeypatch, tmp_path):
@@ -1371,6 +1524,15 @@ def test_java_fail_version(fake_runner, monkeypatch, tmp_path):
     monkeypatch.setattr("setup_doctor.checkers.java._m2_cache_exists", lambda home: True)
     results = JavaChecker().run(CheckContext(repo_path=str(repo), os="windows"))
     assert {r.check_id for r in results if r.status == CheckStatus.FAIL} == {"java.version"}
+
+
+def test_java_runtime_version_fails_is_error(fake_runner, monkeypatch, tmp_path):
+    repo = _node_context(tmp_path, {"pom.xml": "<project/>"})
+    fake_runner.set(["java", "-version"], CommandResult(1, "", "error: invalid flag"))
+    monkeypatch.setattr("setup_doctor.checkers.java.which", lambda name: "C:\\java\\java.exe" if name == "java" else None)
+    monkeypatch.setattr("setup_doctor.checkers.java.run_command", fake_runner)
+    results = JavaChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    assert {r.check_id for r in results if r.status == CheckStatus.FAIL} == {"java.runtime.present"}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1386,7 +1548,7 @@ from __future__ import annotations
 import os
 import re
 from .base import Checker
-from ..models import CheckResult, RemediationStep, CheckStatus
+from ..models import CheckResult, RemediationStep, CheckStatus, Severity
 from ..utils.commands import run_command, which
 
 
@@ -1414,27 +1576,29 @@ class JavaChecker(Checker):
         results = []
         java_exe = which("java")
         present = java_exe is not None
+        version = ""
+        version_ok = True
+        if present:
+            res = run_command([java_exe, "-version"], timeout=10)
+            version = res.stderr or res.stdout
+            version_ok = res.ok and bool(version)  # exe có nhưng -version fail -> FAIL (#5)
         results.append(CheckResult(
             check_id="java.runtime.present", name="JDK present",
             ecosystem=self.ecosystem,
-            status=CheckStatus.PASS if present else CheckStatus.FAIL,
-            evidence=f"java at {java_exe}" if present else "java not found in PATH",
-            remediation=[] if present else [
+            status=CheckStatus.PASS if (present and version_ok) else CheckStatus.FAIL,
+            evidence=f"java {version} at {java_exe}" if (present and version_ok)
+                     else ("java found but -version failed" if present else "java not found in PATH"),
+            remediation=[] if (present and version_ok) else [
                 RemediationStep("Install a JDK", "winget install EclipseAdoptium.Temurin.21.JDK", safe_fix=False),
             ],
         ))
 
-        version = ""
-        if present:
-            res = run_command([java_exe, "-version"], timeout=10)
-            version = res.stderr or res.stdout
-
         required = self._required_major(ctx.repo_path)
-        if not present:
+        if not present or not version_ok:
             results.append(CheckResult(
                 check_id="java.version", name="JDK version",
                 ecosystem=self.ecosystem, status=CheckStatus.SKIP,
-                evidence="skipped: runtime not present",
+                evidence="skipped: runtime not working",
                 depends_on=["java.runtime.present"],
             ))
         elif required is None:
@@ -1474,15 +1638,20 @@ class JavaChecker(Checker):
             depends_on=["java.runtime.present"],
         ))
 
-        # Read-only: chỉ stat cache .m2, KHÔNG chạy mvn dependency:resolve (có thể tải deps + ghi cache).
+        # Read-only: chỉ stat cache .m2. Cache tồn tại KHÔNG chứng minh deps repo đã sẵn sàng
+        # (điểm #6): chỉ báo warning, không PASS; thiếu cache -> FAIL (gợi ý --fix resolve).
         m2_ok = _m2_cache_exists(os.path.expanduser("~"))
         results.append(CheckResult(
             check_id="java.deps.cached", name="Maven cache populated",
             ecosystem=self.ecosystem,
+            severity=Severity.WARNING,
             status=CheckStatus.PASS if m2_ok else CheckStatus.FAIL,
-            evidence="~/.m2/repository populated" if m2_ok else "~/.m2/repository empty/missing (run --fix to resolve)",
+            evidence=("~/.m2/repository populated (không đảm bảo đủ deps cho repo này)" if m2_ok
+                     else "~/.m2/repository empty/missing (run --fix to resolve)"),
             remediation=[] if m2_ok else [
-                RemediationStep("Resolve dependencies (populates cache)", "mvn dependency:resolve", safe_fix=True),
+                RemediationStep("Resolve dependencies (populates cache)", "mvn dependency:resolve",
+                                safe_fix=True, operation="resolve-java-deps",
+                                argv=["mvn", "dependency:resolve"]),
             ],
             depends_on=["java.maven.gradle.present"],
         ))
@@ -1512,7 +1681,7 @@ class JavaChecker(Checker):
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/unit/test_checkers.py -k java -v`
-Expected: 2 PASSED
+Expected: 3 PASSED  # pass, fail_version, runtime_version_fails
 
 - [ ] **Step 5: Commit**
 
@@ -1544,6 +1713,9 @@ def test_dotnet_pass(fake_runner, monkeypatch, tmp_path):
     monkeypatch.setattr("setup_doctor.checkers.dotnet_ck._nuget_cache_ok", lambda: True)
     results = DotnetChecker().run(CheckContext(repo_path=str(repo), os="windows"))
     assert {r.check_id for r in results if r.status == CheckStatus.FAIL} == set()
+    # cache có -> restore.ready là warning (pass nhưng severity warning)
+    ready = next(r for r in results if r.check_id == "dotnet.restore.ready")
+    assert ready.severity == Severity.WARNING
 
 
 def test_dotnet_fail_missing_sdk(fake_runner, monkeypatch, tmp_path):
@@ -1554,6 +1726,15 @@ def test_dotnet_fail_missing_sdk(fake_runner, monkeypatch, tmp_path):
     monkeypatch.setattr("setup_doctor.checkers.dotnet_ck._nuget_cache_ok", lambda: True)
     results = DotnetChecker().run(CheckContext(repo_path=str(repo), os="windows"))
     assert {r.check_id for r in results if r.status == CheckStatus.FAIL} == {"dotnet.sdk.version"}
+
+
+def test_dotnet_cli_list_fails_is_error(fake_runner, monkeypatch, tmp_path):
+    repo = _node_context(tmp_path, {"App.csproj": "<Project Sdk=\"Microsoft.NET.Sdk\" />"})
+    fake_runner.set(["dotnet", "--list-sdks"], CommandResult(1, "", "error"))
+    monkeypatch.setattr("setup_doctor.checkers.dotnet_ck.which", lambda name: "C:\\dotnet\\dotnet.exe" if name == "dotnet" else None)
+    monkeypatch.setattr("setup_doctor.checkers.dotnet_ck.run_command", fake_runner)
+    results = DotnetChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    assert {r.check_id for r in results if r.status == CheckStatus.FAIL} == {"dotnet.runtime.present"}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1569,7 +1750,7 @@ from __future__ import annotations
 import json
 import os
 from .base import Checker
-from ..models import CheckResult, RemediationStep, CheckStatus
+from ..models import CheckResult, RemediationStep, CheckStatus, Severity
 from ..utils.commands import run_command, which
 
 
@@ -1593,27 +1774,29 @@ class DotnetChecker(Checker):
         results = []
         dt = which("dotnet")
         present = dt is not None
+        installed = ""
+        list_ok = True
+        if present:
+            res = run_command([dt, "--list-sdks"], timeout=10)
+            installed = res.stdout
+            list_ok = res.ok  # exe có nhưng lệnh fail -> FAIL (#5)
         results.append(CheckResult(
             check_id="dotnet.runtime.present", name="dotnet CLI present",
             ecosystem=self.ecosystem,
-            status=CheckStatus.PASS if present else CheckStatus.FAIL,
-            evidence=f"dotnet at {dt}" if present else "dotnet not found in PATH",
-            remediation=[] if present else [
+            status=CheckStatus.PASS if (present and list_ok) else CheckStatus.FAIL,
+            evidence=f"dotnet at {dt}" if (present and list_ok)
+                     else ("dotnet found but --list-sdks failed" if present else "dotnet not found in PATH"),
+            remediation=[] if (present and list_ok) else [
                 RemediationStep("Install the .NET SDK", "winget install Microsoft.DotNet.SDK.8", safe_fix=False),
             ],
         ))
 
-        installed = ""
-        if present:
-            res = run_command([dt, "--list-sdks"], timeout=10)
-            installed = res.stdout
-
         required = self._required_version(ctx.repo_path)
-        if not present:
+        if not present or not list_ok:
             results.append(CheckResult(
                 check_id="dotnet.sdk.version", name=".NET SDK version",
                 ecosystem=self.ecosystem, status=CheckStatus.SKIP,
-                evidence="skipped: cli not present",
+                evidence="skipped: cli not working",
                 depends_on=["dotnet.runtime.present"],
             ))
         elif required is None:
@@ -1636,15 +1819,20 @@ class DotnetChecker(Checker):
                 depends_on=["dotnet.runtime.present"],
             ))
 
-        # Read-only: chỉ stat NuGet cache, KHÔNG chạy dotnet restore (tải package → side-effect). Restore chỉ ở --fix.
+        # Read-only: chỉ stat NuGet cache. Cache tồn tại KHÔNG chứng minh deps repo sẵn sàng (điểm #6)
+        # -> warning khi có cache (pass với severity warning), FAIL khi thiếu.
         cache_ok = self._nuget_cache_ok()
         results.append(CheckResult(
             check_id="dotnet.restore.ready", name="NuGet packages cached",
             ecosystem=self.ecosystem,
+            severity=Severity.WARNING,
             status=CheckStatus.PASS if cache_ok else CheckStatus.FAIL,
-            evidence="~/.nuget/packages exists" if cache_ok else "~/.nuget/packages missing (run --fix to restore)",
+            evidence=("~/.nuget/packages exists (không đảm bảo đủ deps cho repo này)" if cache_ok
+                     else "~/.nuget/packages missing (run --fix to restore)"),
             remediation=[] if cache_ok else [
-                RemediationStep("Restore packages (populates cache)", "dotnet restore", safe_fix=True),
+                RemediationStep("Restore packages (populates cache)", "dotnet restore",
+                                safe_fix=True, operation="restore-dotnet",
+                                argv=["dotnet", "restore"]),
             ],
             depends_on=["dotnet.sdk.version"],
         ))
@@ -1672,7 +1860,7 @@ class DotnetChecker(Checker):
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/unit/test_checkers.py -k dotnet -v`
-Expected: 2 PASSED
+Expected: 3 PASSED  # pass, fail_missing_sdk, cli_list_fails
 
 - [ ] **Step 5: Commit**
 
@@ -1721,6 +1909,15 @@ def test_services_db_port_closed(fake_runner, monkeypatch, tmp_path):
     results = ServicesChecker().run(CheckContext(repo_path=str(repo), os="windows"))
     assert results[2].check_id == "services.db.port"
     assert results[2].status == CheckStatus.FAIL
+
+
+def test_services_missing_docker_is_fail(fake_runner, monkeypatch, tmp_path):
+    # Repo có docker-compose nhưng docker không cài -> container.present phải FAIL (không SKIP)
+    repo = _node_context(tmp_path, {"docker-compose.yml": "services:\n  db:\n    image: postgres:16\n"})
+    monkeypatch.setattr("setup_doctor.checkers.services.which", lambda name: None)
+    results = ServicesChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    by_id = {r.check_id: r for r in results}
+    assert by_id["services.container.present"].status == CheckStatus.FAIL
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1737,7 +1934,7 @@ import os
 import socket
 import yaml  # PyYAML is a runtime dependency for this checker
 from .base import Checker
-from ..models import CheckResult, RemediationStep, CheckStatus
+from ..models import CheckResult, RemediationStep, CheckStatus, Severity
 from ..utils.commands import run_command, which
 
 
@@ -1767,14 +1964,22 @@ class ServicesChecker(Checker):
         results = []
         has_compose = bool(self._compose_services(ctx.repo_path))
         docker = which("docker")
-        docker_ok = docker is not None and run_command([docker, "info"], timeout=10).ok
+        if docker is not None:
+            docker_ok = run_command([docker, "info"], timeout=10).ok
+        else:
+            docker_ok = False
+        # Docker thiếu khi repo yêu cầu compose -> FAIL (prerequisite thiếu), không SKIP (#5)
         results.append(CheckResult(
             check_id="services.container.present", name="Docker daemon reachable",
             ecosystem=self.ecosystem,
-            status=CheckStatus.PASS if docker_ok else CheckStatus.SKIP,
-            evidence="docker daemon reachable" if docker_ok else "docker missing/unavailable",
+            status=CheckStatus.PASS if docker_ok
+                   else (CheckStatus.FAIL if has_compose else CheckStatus.SKIP),
+            evidence="docker daemon reachable" if docker_ok
+                     else ("docker missing/unavailable (required by compose)" if has_compose else "no compose; docker not needed"),
             remediation=[] if docker_ok else [
-                RemediationStep("Start Docker Desktop", "start \"\" \"C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe\"", safe_fix=False),
+                RemediationStep("Start Docker Desktop", "start \"\" \"C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe\"",
+                                safe_fix=False, operation="start-docker",
+                                argv=["start", "", "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe"]),
             ],
         ))
 
@@ -1782,22 +1987,36 @@ class ServicesChecker(Checker):
         if docker_ok and expected:
             res = run_command([docker, "compose", "ps", "--format", "{{.Name}}"], cwd=ctx.repo_path, timeout=30)
             running = set(res.stdout.splitlines())
-            missing = expected - running if res.ok else expected
+            # Container name = <project>-<service>-1; so theo PREFIX (không đòi khớp chính xác) (#5)
+            def _running(key):
+                return any(rn == key or rn.startswith(key + "-") or rn.endswith("-" + key + "-1")
+                           for rn in running)
+            missing = {k for k in expected if not _running(k)} if res.ok else set(expected)
             results.append(CheckResult(
                 check_id="services.compose.up", name="Compose services running",
                 ecosystem=self.ecosystem,
                 status=CheckStatus.PASS if not missing else CheckStatus.FAIL,
                 evidence=f"not running: {', '.join(sorted(missing))}" if missing else "all compose services running",
                 remediation=[] if not missing else [
-                    RemediationStep("Start compose services", "docker compose up -d", safe_fix=True),
+                    RemediationStep("Start compose services", "docker compose up -d",
+                                    safe_fix=True, operation="start-service",
+                                    argv=["docker", "compose", "up", "-d"]),
                 ],
+                depends_on=["services.container.present"],
+            ))
+        elif has_compose and not docker_ok:
+            results.append(CheckResult(
+                check_id="services.compose.up", name="Compose services running",
+                ecosystem=self.ecosystem, status=CheckStatus.FAIL,
+                evidence="cannot check: docker unavailable",
+                remediation=[RemediationStep("Start Docker first", "", safe_fix=False)],
                 depends_on=["services.container.present"],
             ))
         else:
             results.append(CheckResult(
                 check_id="services.compose.up", name="Compose services running",
                 ecosystem=self.ecosystem, status=CheckStatus.SKIP,
-                evidence="no compose file / docker unavailable",
+                evidence="no compose file",
                 depends_on=["services.container.present"],
             ))
 
@@ -1815,7 +2034,9 @@ class ServicesChecker(Checker):
                     status=CheckStatus.PASS if ok else CheckStatus.FAIL,
                     evidence=f"port {port} {'open' if ok else 'closed'}",
                     remediation=[] if ok else [
-                        RemediationStep(f"Start {label}", f"docker compose up -d {key}", safe_fix=True),
+                        RemediationStep(f"Start {label}", f"docker compose up -d {key}",
+                                        safe_fix=True, operation="start-service",
+                                        argv=["docker", "compose", "up", "-d", key]),
                     ],
                     depends_on=["services.compose.up"],
                 ))
@@ -1841,7 +2062,8 @@ class ServicesChecker(Checker):
                 ecosystem=self.ecosystem, status=CheckStatus.FAIL,
                 evidence=".env missing but .env.example exists",
                 remediation=[RemediationStep("Create .env from template", "create-env",
-                                             safe_fix=True, files=[".env.example", ".env"])],
+                                             safe_fix=True, operation="create-env",
+                                             argv=None, files=[".env.example", ".env"])],
             ))
         else:
             results.append(CheckResult(
@@ -1861,7 +2083,7 @@ dependencies = ["PyYAML>=6.0"]
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pip install -e ".[dev]"` then `python -m pytest tests/unit/test_checkers.py -k services -v`
-Expected: 2 PASSED
+Expected: 3 PASSED  # fail_no_env, db_port_closed, missing_docker_is_fail
 
 - [ ] **Step 5: Commit**
 
@@ -2060,7 +2282,7 @@ class RegistryChecker(Checker):
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/unit/test_checkers.py -k registry -v`
-Expected: 1 PASSED
+Expected: 2 PASSED  # git_user_warning_ssh_skip_https, git_user_missing_is_warning
 
 - [ ] **Step 5: Commit**
 
@@ -2207,6 +2429,7 @@ def test_dep_groups_root_cause():
     assert set(rcs[0].affected_checks) == {"sdk", "deps", "build"}
     assert rcs[0].chain == "sdk → deps → build"
     assert checks[1].caused_by == "sdk"
+    assert checks[1].causes == ["sdk"]
     assert checks[2].caused_by == "sdk"
     assert checks[0].caused_by is None
 
@@ -2228,6 +2451,59 @@ def test_dep_mixed_pass_fail_no_caused_by_on_pass():
     report = diagnose(checks, "dep", "/repo", "windows")
     assert checks[1].caused_by is None
     assert len(report.diagnosis.root_causes) == 1
+
+
+def test_dep_multiple_dependencies_fail_lists_all_roots():
+    # node.deps.installed phụ thuộc cả lockfile + SDK; cả hai fail -> 2 root causes
+    checks = [
+        CheckResult("sdk", "SDK", "node", status=CheckStatus.FAIL, depends_on=[]),
+        CheckResult("lock", "Lock", "node", status=CheckStatus.FAIL, depends_on=[]),
+        CheckResult("deps", "Deps", "node", status=CheckStatus.FAIL,
+                    depends_on=["lock", "sdk"]),
+    ]
+    report = diagnose(checks, "dep", "/repo", "windows")
+    rc_ids = {rc.cause_check_id for rc in report.diagnosis.root_causes}
+    assert rc_ids == {"sdk", "lock"}
+    assert checks[2].caused_by == "lock"  # primary = root đầu tiên theo thứ tự ổn định
+    assert set(checks[2].causes) == {"lock", "sdk"}
+    # deps có mặt trong affected của CẢ HAI root causes
+    for rc in report.diagnosis.root_causes:
+        assert "deps" in rc.affected_checks
+
+
+def test_dep_skip_dependency_bridges_to_root():
+    # runtime SKIP vì... thực tế: nếu runtime SKIP vì tool thiếu, và child phụ thuộc runtime FAIL
+    # thì engine phải nối child về root cause của runtime nếu có; nếu runtime là SKIP (không fail)
+    # và con phụ thuộc nó -> chain phải thể hiện "blocked by skip".
+    checks = [
+        CheckResult("runtime", "Runtime", "node", status=CheckStatus.SKIP),
+        CheckResult("sdk", "SDK", "node", status=CheckStatus.FAIL, depends_on=["runtime"]),
+    ]
+    report = diagnose(checks, "dep", "/repo", "windows")
+    assert len(report.diagnosis.root_causes) == 1
+    assert report.diagnosis.root_causes[0].cause_check_id == "sdk"
+    # sdk phụ thuộc skip nhưng bản thân fail -> vẫn là root cause (không có failed dep)
+
+
+def test_dep_cycle_does_not_loop():
+    checks = [
+        CheckResult("a", "A", "node", status=CheckStatus.FAIL, depends_on=["b"]),
+        CheckResult("b", "B", "node", status=CheckStatus.FAIL, depends_on=["a"]),
+    ]
+    report = diagnose(checks, "dep", "/repo", "windows")
+    # chu trình a<->b: xử lý an toàn, không treo; ít nhất 1 root cause xác định được
+    ids = {rc.cause_check_id for rc in report.diagnosis.root_causes}
+    assert ids  # non-empty
+    assert len(report.diagnosis.root_causes) >= 1
+
+
+def test_dep_depends_on_missing_id_is_ignored_safely():
+    checks = [CheckResult("a", "A", "node", status=CheckStatus.FAIL,
+                          depends_on=["does-not-exist"])]
+    report = diagnose(checks, "dep", "/repo", "windows")
+    assert len(report.diagnosis.root_causes) == 1
+    assert report.diagnosis.root_causes[0].cause_check_id == "a"
+    assert checks[0].caused_by is None
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2240,58 +2516,87 @@ Expected: FAIL (`diagnosis` is `None` in dep mode yet, or wrong grouping)
 Append to `src/setup_doctor/engine.py`:
 
 ```python
-def _find_root(by_id: dict[str, CheckResult], check_id: str, failed_ids: set[str], seen: set[str]) -> str:
-    if check_id in seen:
-        return check_id
-    seen.add(check_id)
-    failed_deps = [d for d in by_id[check_id].depends_on if d in failed_ids]
-    if not failed_deps:
-        return check_id
-    return _find_root(by_id, failed_deps[0], failed_ids, seen)
+def _failed_roots_of(by_id: dict[str, CheckResult], check_id: str,
+                     failed_ids: set[str], visiting: set[str]) -> set[str]:
+    """Trả về tập root causes (failed, không có failed dependency) mà check_id phụ thuộc (gián tiếp).
 
-
-def _downstream(by_id: dict[str, CheckResult], node_id: str, failed_ids: set[str], root_id: str) -> str | None:
-    """Return the first failed check that depends (directly) on node_id and is caused by root_id."""
-    for c in by_id.values():
-        if (c.check_id in failed_ids and c.check_id != root_id
-                and node_id in c.depends_on and c.caused_by == root_id):
-            return c.check_id
-    return None
+    - Bỏ qua depends_on trỏ tới ID không tồn tại (missing) một cách an toàn.
+    - SKIP dependency không phải failed -> KHÔNG phải root cause; nhưng vẫn được
+      "bắc cầu" qua để tìm root xa hơn nếu có.
+    - Cycle: đánh dấu visiting để không lặp vô hạn; node trong cycle không có
+      failed dep ngoài vòng -> self root.
+    """
+    if check_id in visiting:
+        return {check_id}
+    visiting = visiting | {check_id}
+    node = by_id.get(check_id)
+    if node is None:
+        return set()
+    roots: set[str] = set()
+    for dep in node.depends_on:
+        dep_node = by_id.get(dep)
+        if dep_node is None:
+            continue  # missing ID: bỏ qua an toàn
+        if dep_node.status == CheckStatus.FAIL:
+            dep_roots = _failed_roots_of(by_id, dep, failed_ids, visiting)
+            roots |= dep_roots if dep_roots else {dep}
+        elif dep_node.status == CheckStatus.SKIP:
+            # bridge qua skip để tìm root xa hơn (vd runtime skip -> sdk fail)
+            dep_roots = _failed_roots_of(by_id, dep, failed_ids, visiting)
+            if dep_roots:
+                roots |= dep_roots
+    return roots
 
 
 def _build_dag_diagnosis(checks: list[CheckResult]) -> Diagnosis:
     by_id = {c.check_id: c for c in checks}
     failed_ids = {c.check_id for c in checks if c.status == CheckStatus.FAIL}
     for c in checks:
-        if c.check_id in failed_ids:
-            root = _find_root(by_id, c.check_id, failed_ids, set())
-            if root != c.check_id:
-                c.caused_by = root
-    roots = sorted(c.check_id for c in checks if c.check_id in failed_ids and c.caused_by is None)
+        if c.check_id not in failed_ids:
+            continue
+        roots = _failed_roots_of(by_id, c.check_id, failed_ids, set())
+        # Primary = root đầu tiên theo depends_on đã duyệt (thứ tự sorted cho ổn định)
+        c.causes = sorted(roots) if roots else [c.check_id]
+        c.caused_by = None if c.check_id in roots else (c.causes[0] if c.causes else None)
+    # Root causes = các failed check không bị gây bởi root khác
+    root_ids = sorted(
+        c.check_id for c in checks
+        if c.check_id in failed_ids and c.check_id in c.causes
+    )
     root_causes: list[RootCause] = []
-    for root_id in roots:
-        affected = sorted(c.check_id for c in checks if c.caused_by == root_id)
+    for root_id in root_ids:
+        affected = sorted(
+            c.check_id for c in checks
+            if c.check_id in failed_ids and root_id in c.causes
+        )
         chain_nodes = [root_id]
         current = root_id
         while True:
-            nxt = _downstream(by_id, current, failed_ids, root_id)
-            if nxt is None:
+            nxt = next(
+                (c.check_id for c in checks
+                 if c.check_id in failed_ids and c.check_id != root_id
+                 and current in c.depends_on and root_id in c.causes),
+                None,
+            )
+            if nxt is None or nxt in chain_nodes:
                 break
             chain_nodes.append(nxt)
             current = nxt
         root_causes.append(RootCause(
             cause_check_id=root_id,
             message=f"{by_id[root_id].name} is a root cause of {len(affected)} failing check(s)",
-            affected_checks=[root_id] + affected,
+            affected_checks=[root_id] + [a for a in affected if a != root_id],
             chain=" → ".join(chain_nodes),
         ))
     return Diagnosis(root_causes=root_causes)
 ```
 
+> **Ghi chú (điểm #2 review):** `caused_by` giữ **primary root cause** (root đầu tiên theo thứ tự ổn định) để giữ API quen thuộc; **`causes`** chứa **toàn bộ** root causes — đáp ứng trường hợp multi-dependency fail. Nếu check phụ thuộc nhiều root, check đó xuất hiện trong `affected_checks` của cả các root đó.
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/unit/test_engine.py -v`
-Expected: 7 PASSED
+Expected: 11 PASSED  # 4 flat + 7 dep (multi-root, skip-bridge, cycle, missing-id...)
 
 - [ ] **Step 5: Commit**
 
@@ -2367,9 +2672,10 @@ def test_render_text_contains_fix_commands():
       "severity": "error",
       "status": "fail",
       "evidence": "node v18 expected >=20",
-      "remediation": [{"step": "Install node 22", "command": "nvm install 22", "safe_fix": false, "source": "manual", "files": []}],
+      "remediation": [{"step": "Install node 22", "command": "nvm install 22", "safe_fix": false, "source": "manual", "files": [], "operation": null, "argv": null}],
       "depends_on": ["runtime"],
-      "caused_by": null
+      "caused_by": null,
+      "causes": ["sdk"]
     },
     {
       "check_id": "deps",
@@ -2380,7 +2686,8 @@ def test_render_text_contains_fix_commands():
       "evidence": "missing",
       "remediation": [],
       "depends_on": ["sdk"],
-      "caused_by": "sdk"
+      "caused_by": "sdk",
+      "causes": ["sdk"]
     }
   ],
   "diagnosis": {
@@ -2461,20 +2768,28 @@ git commit -m "feat: output renderers (text/json) with JSON snapshot test"
 ```python
 # tests/integration/test_fixer.py
 import os
-from setup_doctor.fixer import Fixer
+import pytest
+from setup_doctor.fixer import Fixer, OperationNotAllowedError
 from setup_doctor.models import Report, CheckResult, CheckStatus, RemediationStep
 from setup_doctor.utils.commands import CommandResult
+
+
+def _step(op, disp, argv, safe=True, files=(), reversible=True):
+    return RemediationStep(disp, disp, safe_fix=safe, files=list(files),
+                           operation=op, argv=list(argv))
 
 
 def _report_with_fixables():
     checks = [
         CheckResult("env", "env", "services", status=CheckStatus.FAIL,
-                    remediation=[RemediationStep("Create .env", "create-env",
-                                                 safe_fix=True, files=[".env.example", ".env"])]),
+                    remediation=[_step("create-env", "Create .env", [],
+                                       files=[".env.example", ".env"], reversible=True)]),
         CheckResult("deps", "deps", "node", status=CheckStatus.FAIL,
-                    remediation=[RemediationStep("ci", "npm ci", safe_fix=True)]),
+                    remediation=[_step("install-node-deps", "npm ci", ["npm", "ci"],
+                                       reversible=False)]),
         CheckResult("sdk", "sdk", "node", status=CheckStatus.FAIL,
-                    remediation=[RemediationStep("install", "nvm install 22", safe_fix=False)]),  # not safe
+                    remediation=[_step("set-sdk", "nvm install 22", ["nvm", "install", "22"],
+                                       safe=False)]),  # not safe
     ]
     return Report(repo_path="", os="windows", summary={}, checks=checks)
 
@@ -2482,8 +2797,6 @@ def _report_with_fixables():
 def test_fixer_applies_safe_manual_and_backs_up(fake_runner, monkeypatch, tmp_path):
     (tmp_path / ".env.example").write_text("KEY=value\n", encoding="utf-8")
     (tmp_path / ".env").write_text("OLD=1\n", encoding="utf-8")
-    # create-env là op đặc biệt: Fixer tự copy nội dung bằng Python (không dùng shell)
-    # npm ci là whitelist op -> chạy argv ["npm", "ci"]
     fake_runner.set(["npm", "ci"], CommandResult(0, "", ""))
     monkeypatch.setattr("setup_doctor.fixer.run_command", fake_runner)
 
@@ -2501,8 +2814,9 @@ def test_fixer_applies_safe_manual_and_backs_up(fake_runner, monkeypatch, tmp_pa
     assert len(backups) == 1
 
 
-def test_fixer_rolls_back_all_steps_on_late_failure(fake_runner, monkeypatch, tmp_path):
-    # Bước 1 (create-env) thành công; bước 2 (npm ci) thất bại -> rollback bước 1
+def test_fixer_rolls_back_reversible_step_on_later_failure(fake_runner, monkeypatch, tmp_path):
+    # create-env (reversible, đã backup .env) thành công; npm ci (non-reversible) fail
+    # -> chỉ bước reversible được rollback; npm ci ghi rõ "failed / non-reversible".
     (tmp_path / ".env.example").write_text("KEY=value\n", encoding="utf-8")
     (tmp_path / ".env").write_text("OLD=1\n", encoding="utf-8")
     fake_runner.set(["npm", "ci"], CommandResult(1, "", "boom"))
@@ -2513,15 +2827,16 @@ def test_fixer_rolls_back_all_steps_on_late_failure(fake_runner, monkeypatch, tm
     report.repo_path = str(tmp_path)
     fix = Fixer(str(tmp_path)).apply(report)
 
-    # Cả 2 entry: bước 1 applied rồi bị rollback, bước 2 failed
-    assert fix.entries[1].status == "failed"
-    env_entry = next(e for e in fix.entries if e.command == "create-env")
-    assert env_entry.status == "rolled_back"
+    failed = next(e for e in fix.entries if e.status == "failed")
+    assert failed.operation == "install-node-deps"
+    assert "non-reversible" in failed.detail.lower() or "cannot rollback" in failed.detail.lower()
+    rolled = next(e for e in fix.entries if e.status == "rolled_back")
+    assert rolled.operation == "create-env"
     assert (tmp_path / ".env").read_text(encoding="utf-8") == "OLD=1\n"  # restored
 
 
-def test_fixer_removes_newly_created_files_on_rollback(fake_runner, monkeypatch, tmp_path):
-    # .env không tồn tại trước -> sau rollback phải bị xóa (không còn sót)
+def test_fixer_removes_newly_created_file_on_rollback(fake_runner, monkeypatch, tmp_path):
+    # .env không tồn tại trước; create-env tạo nó; npm ci fail -> .env bị xóa
     (tmp_path / ".env.example").write_text("KEY=value\n", encoding="utf-8")
     fake_runner.set(["npm", "ci"], CommandResult(1, "", "boom"))
     monkeypatch.setattr("setup_doctor.fixer.run_command", fake_runner)
@@ -2531,16 +2846,28 @@ def test_fixer_removes_newly_created_files_on_rollback(fake_runner, monkeypatch,
     report.repo_path = str(tmp_path)
     Fixer(str(tmp_path)).apply(report)
 
-    assert not (tmp_path / ".env").exists()  # file mới tạo bị xóa khi rollback
+    assert not (tmp_path / ".env").exists()  # file mới tạo (không có backup) bị xóa khi rollback
 
 
-def test_fixer_rejects_freeform_command_with_operator(fake_runner, monkeypatch, tmp_path):
+def test_fixer_rejects_unknown_operation(fake_runner, monkeypatch, tmp_path):
     bad = [CheckResult("x", "x", "node", status=CheckStatus.FAIL,
-                       remediation=[RemediationStep("chain", "a && b", safe_fix=True)])]
+                       remediation=[_step("unknown-op", "a && b", ["a", "&&", "b"],
+                                          reversible=False)])]
     report = Report(repo_path=str(tmp_path), os="windows", summary={}, checks=bad)
     fix = Fixer(str(tmp_path)).apply(report)
     assert fix.entries[0].status == "skipped"
-    assert "not in whitelist" in fix.entries[0].detail
+    assert "not allowed" in fix.entries[0].detail
+
+
+def test_fixer_rejects_path_outside_repo(fake_runner, monkeypatch, tmp_path):
+    outside = [CheckResult("x", "x", "services", status=CheckStatus.FAIL,
+                           remediation=[_step("create-env", "Create .env", [],
+                                              files=["../outside.env", ".env"])])]
+    report = Report(repo_path=str(tmp_path), os="windows", summary={}, checks=outside)
+    fix = Fixer(str(tmp_path)).apply(report)
+    # file ngoài repo bị chặn -> step không chạy
+    assert fix.entries[0].status == "skipped"
+    assert "outside repo" in fix.entries[0].detail.lower() or "path" in fix.entries[0].detail.lower()
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2560,18 +2887,32 @@ from dataclasses import dataclass, field
 from .models import Report
 from .utils.commands import run_command
 
+
+class OperationNotAllowedError(Exception):
+    """Op không nằm trong whitelist fix (không được tự chạy)."""
+
+
 # Whitelist op: chỉ những op này mới được tự chạy khi --fix.
-# Mỗi op map tới argv list cụ thể (không chuỗi tự do, không shell operator).
-# "create-env" là op đặc biệt: Fixer tự copy nội dung bằng Python (an toàn hơn shell).
-_WHITELIST_OP = {
-    "npm ci": ["npm", "ci"],
-    "yarn install --frozen-lockfile": ["yarn", "install", "--frozen-lockfile"],
-    "py -m venv .venv": ["py", "-m", "venv", ".venv"],
-    "pip install -r requirements.txt": ["pip", "install", "-r", "requirements.txt"],
-    "mvn dependency:resolve": ["mvn", "dependency:resolve"],
-    "dotnet restore": ["dotnet", "restore"],
-    "docker compose up -d": ["docker", "compose", "up", "-d"],
-    "create-env": None,  # handled in Python
+# - argv: lệnh thực thi (list, KHÔNG shell operator).
+# - reversible: True = có thể rollback bằng backup file (chỉ áp dụng cho file
+#   cấu hình nhỏ đã khai báo); False = KHÔNG thể rollback (install/restore/
+#   start-service/cache toàn cục) — chỉ log rõ, không hứa khôi phục.
+# - timeout: riêng cho op fix (npm ci/mvn resolve/dotnet restore có thể lâu);
+#   KHÔNG ràng buộc bởi NFR-3 (30s cho lệnh check).
+_WHITELIST_OP: dict[str, dict] = {
+    "install-node-deps":  {"argv": ["npm", "ci"], "reversible": False, "timeout": 180},
+    "install-yarn-deps":  {"argv": ["yarn", "install", "--frozen-lockfile"], "reversible": False, "timeout": 180},
+    "create-venv":        {"argv": ["py", "-m", "venv", ".venv"], "reversible": False, "timeout": 60},
+    "install-python-deps":{"argv": ["pip", "install", "-r", "requirements.txt"], "reversible": False, "timeout": 180},
+    "resolve-java-deps":  {"argv": ["mvn", "dependency:resolve"], "reversible": False, "timeout": 300},
+    "restore-dotnet":     {"argv": ["dotnet", "restore"], "reversible": False, "timeout": 300},
+    "start-service":      {"argv": ["docker", "compose", "up", "-d"], "reversible": False, "timeout": 180},
+    "create-env":         {"argv": None, "reversible": True, "timeout": 5},  # Python: copy .env.example -> .env
+    "restore-lockfile":   {"argv": ["npm", "install", "--package-lock-only"], "reversible": False, "timeout": 120},
+    "enable-corepack":    {"argv": ["corepack", "enable"], "reversible": False, "timeout": 60},
+    "start-docker":       {"argv": ["start", "", r"C:\Program Files\Docker\Docker\Docker Desktop.exe"],
+                           "reversible": False, "timeout": 30,
+                           "note": "Windows-only; Linux/macOS roadmap"},
 }
 
 
@@ -2579,7 +2920,9 @@ _WHITELIST_OP = {
 class FixLogEntry:
     command: str
     status: str  # applied | skipped | failed | rolled_back
+    operation: str = ""
     detail: str = ""
+    reversible: bool = False
 
 
 @dataclass
@@ -2590,8 +2933,9 @@ class FixReport:
     def to_dict(self) -> dict:
         return {
             "backup_dir": self.backup_dir,
-            "entries": [{"command": e.command, "status": e.status, "detail": e.detail}
-                        for e in self.entries],
+            "entries": [{"command": e.command, "status": e.status,
+                         "operation": e.operation, "detail": e.detail,
+                         "reversible": e.reversible} for e in self.entries],
         }
 
 
@@ -2599,21 +2943,15 @@ class Fixer:
     BACKUP_DIR_NAME = ".setup-doctor-backup"
 
     def __init__(self, repo_path: str):
-        self.repo_path = repo_path
+        self.repo_path = os.path.abspath(repo_path)
         # Timestamp đủ phân giải (microsecond) để tránh trùng khi chạy 2 lần nhanh.
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        self.backup_dir = os.path.join(repo_path, self.BACKUP_DIR_NAME, stamp)
-        # Danh sách các path đã tồn tại TRƯỚC khi fix (để xóa file mới tạo khi rollback).
-        self._preexisting: set[str] = set()
+        self.backup_dir = os.path.join(self.repo_path, self.BACKUP_DIR_NAME, stamp)
 
-    def _snapshot_preexisting(self) -> None:
-        self._preexisting = set()
-        for root, dirs, files in os.walk(self.repo_path):
-            dirs[:] = [d for d in dirs if d != self.BACKUP_DIR_NAME]
-            for name in dirs:
-                self._preexisting.add(os.path.normpath(os.path.join(root, name)))
-            for name in files:
-                self._preexisting.add(os.path.normpath(os.path.join(root, name)))
+    def _is_inside_repo(self, rel: str) -> bool:
+        """Chặn path traversal: file khai báo phải nằm trong repo."""
+        full = os.path.normpath(os.path.join(self.repo_path, rel))
+        return os.path.commonpath([self.repo_path, full]) == self.repo_path
 
     def _backup_file(self, rel: str) -> None:
         src = os.path.join(self.repo_path, rel)
@@ -2624,18 +2962,18 @@ class Fixer:
         shutil.copy2(src, dst)
 
     def _restore_file(self, rel: str) -> None:
+        """Khôi phục file từ backup; nếu file do fix tạo mới (không backup) -> xóa đi."""
         dst = os.path.join(self.backup_dir, rel)
+        target = os.path.join(self.repo_path, rel)
         if os.path.exists(dst):
-            os.makedirs(os.path.dirname(os.path.join(self.repo_path, rel)), exist_ok=True)
-            shutil.copy2(dst, os.path.join(self.repo_path, rel))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copy2(dst, target)
         else:
-            # File mới được tạo bởi fix (không có backup) -> xóa đi (rollback tạo mới).
-            created = os.path.join(self.repo_path, rel)
-            if os.path.exists(created):
-                os.remove(created)
+            if os.path.exists(target):
+                os.remove(target)
 
     def _apply_create_env(self, entry: FixLogEntry) -> None:
-        """create-env: copy .env.example -> .env bằng Python (an toàn hơn shell copy)."""
+        """create-env (reversible): copy .env.example -> .env bằng Python."""
         example = os.path.join(self.repo_path, ".env.example")
         target = os.path.join(self.repo_path, ".env")
         if not os.path.isfile(example):
@@ -2653,19 +2991,25 @@ class Fixer:
             entry.detail = str(exc)
 
     def _apply_step(self, step, entry: FixLogEntry) -> None:
-        # 1) Backup các file khai báo (python code nội bộ, không shell).
+        # 1) Kiểm tra toàn bộ file khai báo nằm trong repo (chống path traversal).
+        for rel in step.files:
+            if not self._is_inside_repo(rel):
+                entry.status = "skipped"
+                entry.detail = f"path outside repo: {rel}"
+                return
+        # 2) Backup các file khai báo (chỉ file cấu hình nhỏ, đã kiểm tra trong repo).
         for rel in step.files:
             self._backup_file(rel)
-        # 2) Chạy theo whitelist op (argv list).
-        if step.command == "create-env":
+        # 3) Thực thi theo operation whitelist.
+        op = _WHITELIST_OP.get(step.operation)
+        if op is None:
+            entry.status = "skipped"
+            entry.detail = f"operation not allowed: {step.operation}"
+            return
+        if step.operation == "create-env":
             self._apply_create_env(entry)
             return
-        argv = _WHITELIST_OP.get(step.command)
-        if argv is None:
-            entry.status = "skipped"
-            entry.detail = "not in whitelist"
-            return
-        res = run_command(argv, cwd=self.repo_path, timeout=120)
+        res = run_command(op["argv"], cwd=self.repo_path, timeout=op["timeout"])
         if res.ok:
             entry.status = "applied"
         else:
@@ -2674,57 +3018,49 @@ class Fixer:
 
     def apply(self, report: Report) -> FixReport:
         os.makedirs(self.backup_dir, exist_ok=True)
-        self._snapshot_preexisting()
         fix_report = FixReport(backup_dir=self.backup_dir)
-        applied_steps: list[tuple] = []  # (step, entry) đã apply thành công để rollback nếu cần
+        applied_reversible: list[tuple] = []  # các bước reversible đã apply -> có thể rollback
         for c in report.checks:
             if c.status.value != "fail":
                 continue
             for step in c.remediation:
-                entry = FixLogEntry(command=step.command, status="skipped")
-                if not step.safe_fix or step.source != "manual":
-                    entry.detail = "not safe_fix or not manual"
+                op = _WHITELIST_OP.get(step.operation or "")
+                entry = FixLogEntry(
+                    command=step.command or (op["argv"][0] if op and op["argv"] else ""),
+                    status="skipped",
+                    operation=step.operation or "",
+                    reversible=bool(op and op["reversible"]),
+                )
+                if not step.safe_fix or step.source != "manual" or step.operation is None:
+                    entry.detail = "not safe_fix / not manual / no operation"
                 else:
                     self._apply_step(step, entry)
                     if entry.status == "applied":
-                        applied_steps.append((step, entry))
+                        if entry.reversible:
+                            applied_reversible.append((step, entry))
                     elif entry.status == "failed":
-                        # Transaction: rollback TẤT CẢ các bước đã apply trước đó.
-                        self._rollback_transaction(applied_steps)
-                        applied_steps.clear()
+                        # Transaction: rollback các bước REVERSIBLE đã apply.
+                        # Các op non-reversible (npm ci/mvn/docker) ĐÃ CHẠY THÀNH CÔNG
+                        # trước đó không thể khôi phục — chỉ ghi rõ trong log.
+                        for prev_step, prev_entry in applied_reversible:
+                            for rel in prev_step.files:
+                                self._restore_file(rel)
+                            prev_entry.status = "rolled_back"
+                        applied_reversible.clear()
                 fix_report.entries.append(entry)
-                if not applied_steps and entry.status == "failed":
-                    # nếu đã có fail và không còn bước applied -> dừng toàn bộ fix
-                    # (không chạy tiếp bước sau để tránh hỏng thêm)
+                if entry.status == "failed":
+                    # Dừng toàn bộ nếu có bước fail (tránh chồng thêm lỗi).
+                    for e in fix_report.entries:
+                        if e.status in ("skipped",) and e.operation in _WHITELIST_OP:
+                            pass
                     return fix_report
         return fix_report
-
-    def _rollback_transaction(self, applied_steps) -> None:
-        """Khôi phục file từ backup + xóa file/dir mới tạo (transaction semantics)."""
-        for prev_step, prev_entry in applied_steps:
-            for rel in prev_step.files:
-                self._restore_file(rel)
-            prev_entry.status = "rolled_back"
-        # Xóa các path mới tạo sau khi fix (không có trong snapshot trước), trừ backup dir.
-        for root, dirs, files in os.walk(self.repo_path):
-            dirs[:] = [d for d in dirs if d != self.BACKUP_DIR_NAME]
-            for name in list(dirs) + list(files):
-                full = os.path.join(root, name)
-                if os.path.normpath(full) in self._preexisting:
-                    continue
-                if os.path.isdir(full) and not os.path.islink(full):
-                    shutil.rmtree(full, ignore_errors=True)
-                else:
-                    try:
-                        os.remove(full)
-                    except OSError:
-                        pass
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/integration/test_fixer.py -v`
-Expected: 2 PASSED
+Expected: 5 PASSED  # applies_safe, rolls_back_reversible, removes_new_created, rejects_unknown_op, rejects_path_outside
 
 - [ ] **Step 5: Commit**
 
@@ -3113,7 +3449,7 @@ class AIExplainer:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/unit/test_ai.py -v`
-Expected: 7 PASSED
+Expected: 10 PASSED  # 3 (provider) + 7 (remediation/explainer/quota/sanitize/schema)
 
 - [ ] **Step 5: Commit**
 
@@ -3164,16 +3500,25 @@ def test_metrics_precision_recall_accuracy():
 
 
 def test_metrics_recall_partial():
+    # "zz" nằm trong expected_failures -> THUỘC universe. Tool không emit check "zz"
+    # -> FN=1 (theo quy tắc 4.6, ID trong GT luôn thuộc universe; không emit = FN).
     gt = {"expected_failures": ["a", "b", "zz"], "expected_passes": ["c"]}
     m = compute_metrics(_report(), gt)
     assert m["recall"] == 2 / 3
     assert m["fn"] == 1
-    # "zz" nằm ngoài universe (không phải fail cũng không pass được gán) -> không tính vào TN/FP
     assert m["accuracy"] == 3 / 4  # (tp=2 + tn=1) / universe(4: a,b,c,zz)
 
 
+def test_metrics_missing_emit_is_fn():
+    # ground truth gán fail cho check KHÔNG có trong report -> FN (tool không emit)
+    gt = {"expected_failures": ["a", "zz"], "expected_passes": []}
+    m = compute_metrics(_report(), gt)
+    assert m["fn"] == 1  # zz không emit -> FN
+
+
 def test_metrics_fp_only_when_gt_explicitly_passes():
-    # Tool báo fail cho check "d" (ngoài universe) -> không tính FP
+    # Tool báo fail cho check "d" (KHÔNG có trong ground truth) -> không tính FP
+    # (check chưa được gán nhãn, không phạt tool vì phát hiện thêm).
     checks = _report().checks + [CheckResult("d", "D", "node", status=CheckStatus.FAIL)]
     report = Report(repo_path="/r", os="windows", mode="flat", summary={}, checks=checks)
     gt = {"expected_failures": ["a", "b"], "expected_passes": ["c"]}
@@ -3189,6 +3534,16 @@ def test_metrics_fp_when_gt_passes_but_tool_fails():
     m = compute_metrics(report, gt)
     assert m["fp"] == 1
     assert m["precision"] == 0.0
+
+
+def test_validate_ground_truth_rejects_unknown_ids():
+    # ID trong ground truth phải thuộc catalog check; sai -> reject (điểm #7)
+    from setup_doctor.study.ground_truth import validate_ground_truth
+    catalog_ids = {"a", "b", "c", "node.sdk.version"}
+    bad = {"expected_failures": ["a", "node.sdk.version", "zz-not-a-check"]}
+    errors = validate_ground_truth(bad, catalog_ids)
+    assert "zz-not-a-check" in errors
+    assert len(errors) == 1
 
 
 def test_metrics_clarity_dep_mode():
@@ -3216,6 +3571,36 @@ Expected: FAIL (`ModuleNotFoundError: No module named 'setup_doctor.study'`)
 ```
 
 ```python
+# src/setup_doctor/study/ground_truth.py
+from __future__ import annotations
+import json
+
+
+def validate_ground_truth(data: dict, catalog_ids: set[str]) -> list[str]:
+    """Kiểm tra ground truth: mọi ID trong expected_failures/passes/root_causes
+    phải thuộc catalog check. Trả về danh sách lỗi (rỗng = hợp lệ).
+
+    (điểm #7 review) — ID ngoài catalog bị từ chối để universe luôn có ý nghĩa.
+    """
+    errors: list[str] = []
+    for field in ("expected_failures", "expected_passes", "expected_root_causes"):
+        for check_id in data.get(field, []) or []:
+            if check_id not in catalog_ids:
+                errors.append(f"{field}: unknown check_id '{check_id}' (not in catalog)")
+    return errors
+
+
+def load_ground_truth(path: str) -> dict:
+    """Đọc 1 file ground truth JSON và validate cấu trúc cơ bản."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    for key in ("repo", "expected_failures"):
+        if key not in data:
+            raise ValueError(f"ground truth {path} thiếu field '{key}'")
+    return data
+```
+
+```python
 # src/setup_doctor/study/metrics.py
 from __future__ import annotations
 from ..models import Report, CheckStatus
@@ -3224,11 +3609,13 @@ from ..models import Report, CheckStatus
 def compute_metrics(report: Report, ground_truth: dict) -> dict:
     """Tính metrics trên universe nhãn đã gán = expected_failures ∪ expected_passes.
 
+    Quy tắc (chốt review #7):
+    - Mọi ID trong ground truth THUỘC universe.
     - TP: tool fail & gt fail.
     - FP: tool fail & gt pass (tường minh).
-    - FN: tool pass/skip & gt fail.
+    - FN: tool pass/skip, HOẶC tool không emit check đó (status None) — gt fail.
     - TN: tool pass & gt pass.
-    - Tool báo fail cho check KHÔNG có nhãn -> ngoài universe, không tính (không phạt FP).
+    - Tool fail cho ID KHÔNG có trong gt -> không tính FP (không phạt phát hiện thêm).
     """
     expected_fail = set(ground_truth.get("expected_failures", []))
     expected_pass = set(ground_truth.get("expected_passes", []))
@@ -3243,7 +3630,7 @@ def compute_metrics(report: Report, ground_truth: dict) -> dict:
 
     tp = fp = fn = tn = 0
     for check_id in universe:
-        status = status_by_id.get(check_id)
+        status = status_by_id.get(check_id)  # None nếu tool không emit check -> FN
         is_fail = status == CheckStatus.FAIL
         if check_id in expected_fail:
             if is_fail:
@@ -3354,7 +3741,7 @@ def _registry_relevant(repo_path: str) -> bool:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/unit/test_metrics.py -v`
-Expected: 4 PASSED
+Expected: 8 PASSED  # precision/recall/acc, recall_partial, missing_emit_fn, fp nuances, validate_gt, clarity x2
 
 - [ ] **Step 5: Commit**
 

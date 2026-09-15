@@ -1,10 +1,10 @@
 # Developer Setup Doctor — Thiết kế
 
 - **Ngày:** 2026-09-15
-- **Phiên bản:** 1.2
+- **Phiên bản:** 1.3
 - **Status:** Đã duyệt (Ready for implementation planning)
 - **Người duyệt:** Người dùng (đã xác nhận trong phiên brainstorming)
-- **Thay đổi v1.1→v1.2:** sửa theo review.
+- **Thay đổi v1.1→v1.2:** sửa theo review round 1.
   - Chuẩn hóa ID check theo catalog (`node.deps.installed`, `node.build.ready`...) và sửa AC-1 cho khớp.
   - Làm rõ ranh giới read-only: **check không chạy lệnh có side-effect** (`mvn dependency:resolve`, `dotnet restore`, `npm ci`, build) — các thao tác này chỉ xảy ra trong `--fix`; check chỉ đọc file/stat/cache/TCP probe.
   - Xóa các check `*.build.run` khỏi catalog để tránh hiểu nhầm chạy build trong check; thay bằng `*.build.ready` (kiểm tra tĩnh).
@@ -13,6 +13,15 @@
   - Metrics nghiên cứu: accuracy tính trên **universe nhãn đã gán** (`expected_failures` ∪ `expected_passes`); `time_to_build` là metric **thủ công ngoài tool** (theo protocol 5.4) — không tính trong harness.
   - AI: redact evidence trước khi gửi; **một quota chung** cho tất cả AI requests (remediation + explainer); validate schema output trước khi hiển thị.
   - Fixer: thiết kế lại theo **transaction**: backup toàn bộ trước, rollback toàn bộ + xóa file mới nếu lỗi, timestamp phút-µs chống trùng, lệnh dạng argv whitelist.
+- **Thay đổi v1.2→v1.3 (review round 2):**
+  - Version parser: `satisfies` trả `None` cho constraint unsupported → checker báo **warning/skip** (không fail sai); test `~`/`||` sửa đúng.
+  - DAG dep-mode: thêm `causes: list[str]` (mọi root causes); `caused_by` giữ primary; xử lý multi-dep fail, skip-bridge, cycle, missing ID.
+  - Fixer hạ cam kết rollback: chỉ rollback được file cấu hình nhỏ đã backup (reversible); install/restore/start-service ghi rõ **non-reversible**; chặn path traversal; bỏ xóa mọi path mới tạo.
+  - Data model: tách `operation` + `argv` + `command`(display) — whitelist theo operation.
+  - Checker semantics: runtime `--version` fail → FAIL; npm/docker thiếu → FAIL; `.venv` yêu cầu `pyvenv.cfg`; deps fail khi thiếu venv; compose so theo prefix name.
+  - Cache check (`.m2`/`.nuget`): tồn tại → **warning** (không chứng minh deps repo sẵn sàng); thiếu → FAIL.
+  - Metrics: ID trong GT luôn thuộc universe, tool không emit → FN; `validate_ground_truth` reject ID ngoài catalog; nêu rõ flat/dep không khác nhau ở precision/recall.
+  - Nhỏ: NFR-3 tách timeout check (30s) vs fix op (timeout riêng); AC-9 chốt schema `ai_explanation` duy nhất (null/string).
 
 ---
 
@@ -131,7 +140,7 @@ Xây một CLI tool **Developer Setup Doctor** đa nền tảng, kiểm tra **m�
 |---|---|---|
 | NFR-1 | **An toàn**: mọi thao tác sửa chỉ qua `--fix` + backup; không xóa file người dùng; không sửa credentials | Mặc định read-only |
 | NFR-2 | **Repeatable**: cùng repo + cùng môi trường → cùng kết quả; không thay đổi trạng thái khi chạy check | Đầu ra ổn định |
-| NFR-3 | **Hiệu năng**: mỗi lệnh có timeout 30s; tổng thời gian chạy < 2 phút cho 1 repo | - |
+| NFR-3 | **Hiệu năng**: mỗi LỆNH CHECK có timeout 30s; tổng thời gian check < 2 phút cho 1 repo. **Lưu ý:** timeout này chỉ áp dụng cho lệnh trong lúc CHECK (đọc). Các op `--fix` (npm ci, mvn resolve, dotnet restore, docker) dùng **timeout riêng dài hơn** trong `_WHITELIST_OP` — không ràng buộc bởi 30s (xem 3.10) | - |
 | NFR-4 | **Khả năng mở rộng**: thêm checker mới = thêm 1 module đăng ký vào entry point, không sửa framework | Plugin-style (entry points) |
 | NFR-5 | **Windows-first**: MVP hỗ trợ Windows; remediation có OS-specific (mặc định Windows; Linux/macOS roadmap) | - |
 | NFR-6 | **Độ chính xác**: checker phát hiện đúng >= 90% lỗi seeded trong fixture | Kiểm chứng bằng test |
@@ -149,7 +158,7 @@ Xây một CLI tool **Developer Setup Doctor** đa nền tảng, kiểm tra **m�
 - **AC-6**: Với repo không phải ecosystem hỗ trợ, exit code 0 + message "no supported ecosystem detected".
 - **AC-7**: Bật `--ai` với repo Node thiếu SDK: phần remediation có gợi ý của AI; khi tắt mạng/không có key → kết quả vẫn đầy đủ với lệnh viết tay (không crash, exit code đúng).
 - **AC-8**: Chạy `study` 2 lần trên cùng dữ liệu → 2 kết quả giống hệt nhau (deterministic, không có AI trong research).
-- **AC-9**: Report JSON không bật `--ai` khớp schema 1.0; khi bật `--ai` chỉ thêm field `ai` (opt-in) không phá vỡ schema cũ.
+- **AC-9**: Report JSON luôn có `diagnosis.ai_explanation` (null khi tắt `--ai`, string khi bật) — **một schema duy nhất** cho cả hai trường hợp, không có field `ai` riêng; không vi phạm schema 1.0.
 - **AC-10**: Config file đọc đúng; CLI flag ghi đè config file.
 
 ---
@@ -221,7 +230,8 @@ Xây một CLI tool **Developer Setup Doctor** đa nền tảng, kiểm tra **m�
 |---|---|
 | Lệnh không tồn tại | Checker báo `skip` kèm lý do; không coi là lỗi nếu ecosystem không liên quan |
 | Repo không phải ecosystem hỗ trợ | "no supported ecosystem detected" + exit 0 |
-| Command timeout (30s) | `fail` + remediation "tăng timeout / kiểm tra môi trường" |
+| **Command timeout (30s)** — lệnh CHECK | `fail` + remediation "tăng timeout / kiểm tra môi trường" |
+| **Fix op timeout** (npm ci/mvn/dotnet/docker) | Dùng `timeout` riêng trong `_WHITELIST_OP` (60-300s), KHÔNG ràng buộc bởi NFR-3 |
 | Parse lỗi trong config project | `fail` + evidence lỗi parse cụ thể |
 | Lỗi nội bộ tool | Exit 2 + stack trace; không thay đổi repo |
 | `--fix` lỗi giữa chừng | Khôi phục từ backup, báo lỗi rõ ràng |
@@ -549,7 +559,12 @@ Study.run(repos: list[Path], ground_truth: dict) -> StudyReport
 }
 ```
 
-> **Universe đánh giá (quantification universe):** `expected_failures ∪ expected_passes`. Mọi metric (TP/FP/FN/TN/accuracy) tính trên **chính universe này**, không phải toàn bộ checks của tool. Một lỗi ground truth không xuất hiện trong danh sách check của tool được coi là **ngoài universe** (không tính vào TP/FN/accuracy) — tránh accuracy vô nghĩa (điểm #7 review).
+> **Universe đánh giá (quantification universe):** `expected_failures ∪ expected_passes`. Mọi metric (TP/FP/FN/TN/accuracy) tính trên **chính universe này**, không phải toàn bộ checks của tool.
+>
+> **Quy tắc (chốt theo review #7):**
+> - **Mọi ID trong ground truth đều thuộc universe** — kể cả khi tool không emit check đó (→ check đó được coi là **FN** nếu nằm trong `expected_failures`, hay **TN** nếu nằm trong `expected_passes` — nhưng tool không emit là dấu hiệu thiếu sót của checker, phải ghi lại như lỗi ground-truth coverage).
+> - Tool báo fail cho ID **không có trong ground truth** → **không tính FP** (check chưa được gán nhãn, không phạt tool vì phát hiện thêm).
+> - **ID trong ground truth nhưng không thuộc catalog check** (check_id hợp lệ — ví dụ `node.sdk.version` wrong) → **từ chối khi validate ground truth** (báo lỗi rõ tên check không hợp lệ). Điều này đảm bảo universe luôn có ý nghĩa.
 
 ### 4.7 Metrics nghiên cứu
 
@@ -562,15 +577,19 @@ Tất cả metrics tính trên **universe nhãn đã gán** = `expected_failures
 | **accuracy** | (TP + TN) ÷ universe_size (số nhãn đã gán, không phải tổng checks) |
 | **f1** | Harmonic mean của precision & recall |
 | **clarity** | Dep mode: số root cause khớp `expected_root_causes` ÷ tổng `expected_root_causes` |
+| **remediation_order_correct** | (Dep mode, thủ công hoặc bán tự động) Tỷ lệ repo mà thứ tự remediation theo root cause giúp build thành công mà **không phải sửa lại lỗi đã "sửa"**. Ghi chú định tính. |
+| **superfluous_steps** | (Dep mode) Số bước remediation mà người nghiên cứu KHÔNG cần làm (dư thừa) khi làm theo thứ tự root-cause — đo thủ công. |
 | **time_to_build** | **Metric thủ công ngoài tool** — người nghiên cứu đo bấm giờ theo protocol 5.4; không phải field do harness tính |
+
+> **Quan trọng (theo review #7):** flat và dep dùng **cùng bộ `CheckResult`** nên precision/recall/accuracy/f1 **chắc chắn giống hệt nhau** giữa hai mode — các metric này **không dùng để so sánh** "dep tốt hơn flat". Sự khác biệt chỉ nằm ở: **clarity** (độ chính xác root cause), **remediation_order_correct**, **superfluous_steps**, và đánh giá người dùng (thủ công). Báo cáo nghiên cứu phải nêu rõ điều này để tránh kết luận sai.
 
 Nghĩa của TP/FP/FN/TN (trên universe):
 - **TP**: tool báo fail, ground truth gán fail.
-- **FP**: tool báo fail, ground truth gán pass (hoặc không có trong universe → **không tính** — nằm ngoài universe).
-- **FN**: tool báo pass/skip, ground truth gán fail.
+- **FP**: tool báo fail, ground truth gán pass.
+- **FN**: tool báo pass/skip **hoặc không emit check**, ground truth gán fail (xem quy tắc 4.6 — ID trong GT luôn thuộc universe).
 - **TN**: tool báo pass, ground truth gán pass.
 
-> **Lưu ý:** tool báo fail cho check *không nằm trong universe* (không được gán nhãn) → không tính vào FP (tránh phạt tool vì phát hiện thêm). Chỉ FP khi ground truth **tường minh** gán pass mà tool báo fail.
+> **Lưu ý:** tool báo fail cho check *không nằm trong ground truth* (không được gán nhãn) → không tính vào FP (tránh phạt tool vì phát hiện thêm). Chỉ FP khi ground truth **tường minh** gán pass mà tool báo fail. Chỉ FN khi ground truth **tường minh** gán fail mà tool không báo fail.
 
 ### 4.8 Cấu hình tool (config file `setup-doctor.toml`)
 
