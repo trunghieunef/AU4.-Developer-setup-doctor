@@ -10,14 +10,62 @@
 
 ## Tính năng
 
-- 🧩 **6 nhóm checker**: Node.js, Python, Java, .NET, dịch vụ cục bộ (Docker/PostgreSQL/Redis), registry/credentials
-- 🔍 **2 chế độ chẩn đoán** trên cùng một bộ check:
-  - `flat` — checklist phẳng từng mục
-  - `dep` (**mặc định**) — gom lỗi theo **nguyên nhân gốc** (root cause) qua đồ thị phụ thuộc, chỉ rõ sửa gì trước
-- 📦 **Output đa dạng**: terminal (human-readable) + JSON (machine-readable, schema 1.0) + exit code chuẩn
-- 🛠️ **`--fix` có kiểm soát**: chỉ áp dụng remediation nằm trong **operation whitelist** (argv an toàn, không shell operator), có backup + log; **re-check sau khi sửa** để trả exit code của trạng thái cuối
-- 🤖 **AI tăng cường (tùy chọn)**: gợi ý lệnh sửa động + giải thích nguyên nhân tự nhiên — có `sanitize`, quota chung, validate schema, **fallback rule-based** khi AI không khả dụng
-- 🔬 **`study` harness**: so sánh định lượng flat vs dep (deterministic, không dùng AI) phục vụ nghiên cứu
+### 🧩 Chẩn đoán đa nền tảng codebase (read-only)
+
+Phát hiện ecosystem tự động qua marker file và kiểm tra các điều kiện tiên quyết **mà không sửa gì**:
+
+| Ecosystem | Marker được phát hiện | Kiểm tra chính |
+|---|---|---|
+| **Node.js** | `package.json` | version theo `engines`/`.nvmrc`, npm, lockfile, `node_modules`, build tool |
+| **Python** | `pyproject.toml`, `requirements.txt` | version theo `requires-python`/`.python-version`, venv (`pyvenv.cfg`), deps |
+| **Java** | `pom.xml`, `build.gradle` | JDK version, Maven/Gradle/wrapper, cache `.m2`, build file |
+| **.NET** | `*.sln`, `*.csproj`, `global.json` | dotnet CLI, SDK version theo `global.json`, NuGet cache, project file |
+| **Services** | `docker-compose.yml`, `.env.example` | Docker daemon, compose services, port PostgreSQL/Redis, `.env` |
+| **Registry** | `.npmrc`, `pip.conf`, `.git/config` | git user/SSH (warning), npm/pip registry |
+
+Mỗi check có **bằng chứng cụ thể** (version tìm thấy, file tồn tại, lệnh chạy được) và **bước khắc phục chính xác** đi kèm — không đoán mò.
+
+### 🔍 2 chế độ chẩn đoán trên cùng một bộ check
+
+| Chế độ | Cách hoạt động | Khi nào dùng |
+|---|---|---|
+| `flat` | Checklist phẳng: liệt kê từng check pass/fail độc lập | Muốn thấy toàn cảnh từng mục |
+| `dep` (**mặc định**) | Dựng đồ thị phụ thuộc từ `depends_on`, gom lỗi **hệ quả** về **root cause**, vẽ chuỗi `a -> b -> c` và chỉ rõ sửa cái nào trước | Developer mới / muốn biết sửa gì trước |
+
+Ví dụ: thiếu SDK khiến deps không cài được → `dep` gom thành **1 root cause** thay vì 2 lỗi độc lập.
+
+### 📦 Output đa dạng cho người và máy
+
+- **Terminal** — human-readable, dấu `[PASS]/[FAIL]/[SKIP]`, kèm bước sửa và root-cause chain
+- **JSON** — machine-readable, schema ổn định (`schema_version: 1.0`), dùng được cho CI/script
+- **Exit code chuẩn** — `0` pass, `1` có lỗi, `2` lỗi input/nội bộ
+
+### 🛠️ `--fix` tự sửa an toàn (có kiểm soát)
+
+- Chỉ áp dụng remediation nằm trong **operation whitelist** — lệnh dạng **argv an toàn**, không shell operator
+- **Backup** tất cả file bị ảnh hưởng vào `.setup-doctor-backup/<timestamp>/` trước khi sửa
+- **Rollback** chỉ đảm bảo cho thao tác **reversible** (file cấu hình nhỏ); install/restore/start-service được đánh dấu **non-reversible** và ghi rõ trong log
+- **Re-check sau khi sửa** — exit code phản ánh trạng thái cuối, không phải trước fix
+- Chống **path traversal** — file trong `step.files` phải nằm trong repo
+
+### 🤖 AI tăng cường (tùy chọn)
+
+- Gợi ý lệnh sửa **động theo evidence** thực tế + giải thích nguyên nhân tự nhiên
+- An toàn: `sanitize` evidence trước khi gửi, **quota chung** giới hạn chi phí, validate schema output
+- **Fallback rule-based** hoàn toàn khi AI không khả dụng/key thiếu — không bao giờ crash
+- AI không quyết định `status`/`severity` — chỉ bổ sung nội dung hiển thị
+
+### 🔬 `study` — harness nghiên cứu
+
+- Chạy đồng loạt trên nhiều repo, đối chiếu ground truth → metrics **precision/recall/accuracy/clarity/f1**
+- **Deterministic** (không dùng AI) → tái lập được kết quả cho nghiên cứu
+- Xuất CSV/JSON phục vụ phân tích so sánh `flat` vs `dep`
+
+### 🎯 Nền tảng
+
+- Tự động phát hiện ecosystem qua marker file
+- Plugin-style: thêm checker mới = thêm module + entry point, không sửa framework
+- Config linh hoạt: file TOML + env + CLI flag
 
 ## Yêu cầu hệ thống
 
