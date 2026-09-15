@@ -10,7 +10,7 @@ kèm bước khắc phục chính xác và kết quả machine-readable (JSON + 
   - `flat` — checklist phẳng từng mục
   - `dep` — gom lỗi theo **nguyên nhân gốc** (root cause) qua đồ thị phụ thuộc, chỉ rõ sửa gì trước
 - 📦 **Output**: terminal (human-readable) + JSON (machine-readable) + exit code
-- 🛠️ **`--fix` an toàn**: chỉ áp dụng remediation `safe_fix` có backup + log + rollback — không bao giờ tự thay đổi cấu hình khi không có `--fix`
+- 🛠️ **`--fix` có kiểm soát**: chỉ áp dụng remediation `safe_fix` trong whitelist, có backup + log; chỉ thao tác reversible mới rollback được — không tự thay đổi khi thiếu `--fix`
 - 🤖 **AI tăng cường (tùy chọn)**: gợi ý lệnh sửa động + giải thích nguyên nhân tự nhiên, có fallback rule-based
 - 🔬 **`study`**: harness nghiên cứu so sánh flat vs dep (deterministic, không dùng AI)
 
@@ -28,7 +28,7 @@ setup-doctor check <repo>                  # chẩn đoán (mặc định mode=d
 setup-doctor check <repo> --mode flat      # checklist phẳng
 setup-doctor check <repo> --format json    # JSON machine-readable
 setup-doctor check <repo> --format json --output report.json  # ghi JSON ra file
-setup-doctor check <repo> --fix            # áp dụng remediation an toàn (có backup)
+setup-doctor check <repo> --fix            # áp dụng remediation trong whitelist (có backup)
 setup-doctor check <repo> --ai             # tăng cường AI (cần SETUP_DOCTOR_API_KEY)
 setup-doctor study repos.txt --ground-truth research/ground_truth --output-dir research/output
 setup-doctor --version
@@ -60,7 +60,7 @@ format = "text"            # text | json
 ## An toàn
 
 - Mặc định **read-only**: chạy check không thay đổi gì trong repo.
-- `--fix` chỉ áp dụng các remediation có `safe_fix=true` và `source=manual`, backup vào `.setup-doctor-backup/<timestamp>/`, log mọi thay đổi, rollback khi lệnh lỗi.
+- `--fix` chỉ áp dụng các remediation có `safe_fix=true`, `source=manual` và operation nằm trong whitelist; backup vào `.setup-doctor-backup/<timestamp>/`. Chỉ operation reversible mới được rollback; install/restore/start-service có thể không đảo ngược và luôn được ghi rõ trong log.
 - AI chỉ gửi `check_id`/evidence đã lọc/OS lên LLM; **không gửi credentials hay nội dung file repo**; API key đọc từ env `SETUP_DOCTOR_API_KEY`.
 - Nghiên cứu (`study`) luôn chạy **rule-based** — deterministic, tái lập được.
 

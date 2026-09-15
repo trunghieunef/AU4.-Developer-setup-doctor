@@ -59,7 +59,7 @@ Xây một CLI tool **Developer Setup Doctor** đa nền tảng, kiểm tra **m�
 - Hỗ trợ 6 nhóm checker: Node.js, Python, Java, .NET, dịch vụ cục bộ, registry/credentials.
 - 2 chế độ chẩn đoán: `flat` và `dep` (dependency-aware), chạy **cùng bộ check**.
 - Output: terminal (human-readable) + JSON (machine-readable) + exit code.
-- Tùy chọn `--fix` an toàn (có backup) — chỉ in các bước nếu không dùng `--fix`.
+- Tùy chọn `--fix` có kiểm soát (có backup) — chỉ in các bước nếu không dùng `--fix`.
 - Research harness (`setup-doctor study`) để so sánh 2 chế độ trên repo thực tế.
 - **Tích hợp AI tùy chọn (P1, tách khỏi nghiên cứu):**
   - AI gợi ý remediation động theo evidence thực tế (fallback về lệnh viết tay khi AI không khả dụng).
@@ -84,7 +84,7 @@ Xây một CLI tool **Developer Setup Doctor** đa nền tảng, kiểm tra **m�
 | Người dùng | Kịch bản chính |
 |---|---|
 | **Developer mới** (người dùng chính) | Clone repo → chạy `setup-doctor check <repo>` → nhận danh sách lỗi + bước sửa → làm theo → build thành công nhanh |
-| **Developer có kinh nghiệm** | Chạy `--fix` để tự động cài deps / tạo `.env` an toàn; dùng JSON để tích hợp CI |
+| **Developer có kinh nghiệm** | Chạy `--fix` để tự động cài deps / tạo `.env` theo whitelist; dùng JSON để tích hợp CI |
 | **Nhà nghiên cứu / đánh giá** | Chạy `setup-doctor study` trên 10-20 repo thực tế → xuất bảng so sánh flat vs dep |
 
 ### 2.1a User stories
@@ -102,7 +102,7 @@ Xây một CLI tool **Developer Setup Doctor** đa nền tảng, kiểm tra **m�
 
 | ID | User story | Tiêu chí chấp nhận |
 |---|---|---|
-| US-5 | Là một developer có kinh nghiệm, tôi muốn dùng `--fix` để tự động cài dependencies / khởi động service / tạo `.env` an toàn có backup, để tiết kiệm thời gian lặp lại trên nhiều máy | `--fix` tạo backup trước khi đổi; log đầy đủ; rollback nếu lỗi (AC-3) |
+| US-5 | Là một developer có kinh nghiệm, tôi muốn dùng `--fix` để tự động cài dependencies / khởi động service / tạo `.env` theo whitelist, để tiết kiệm thời gian lặp lại trên nhiều máy | `--fix` backup file trước khi đổi; log đầy đủ; rollback các thao tác reversible nếu lỗi (AC-3) |
 | US-6 | Là một developer có kinh nghiệm, tôi muốn lấy **kết quả JSON chuẩn + exit code** để tích hợp vào CI, để pipeline tự chặn build khi môi trường thiếu | `--format json` đúng schema 1.0; exit 1 khi fail, 0 khi pass |
 | US-7 | Là một developer có kinh nghiệm, tôi muốn bật `--ai` để nhận **gợi ý sửa lỗi động theo tình huống** và giải thích nguyên nhân tự nhiên, để tiết kiệm thời gian tra cứu khi gặp lỗi lạ | Bật `--ai`: remediation có `source: "ai"`; khi AI lỗi → fallback giữ nguyên, không crash (AC-7) |
 | US-8 | Là một developer có kinh nghiệm, tôi muốn cấu hình mặc định (mode, AI, format) qua **file config**, để các lần chạy sau khỏi gõ lại đủ cờ | Config file đọc đúng; CLI flag ghi đè (AC-10) |
@@ -121,12 +121,12 @@ Xây một CLI tool **Developer Setup Doctor** đa nền tảng, kiểm tra **m�
 | FR-1 | CLI nhận path repo, tự phát hiện ecosystem (package.json, pyproject.toml, pom.xml, *.sln, docker-compose.yml...) | P0 |
 | FR-2 | Kiểm tra SDK version theo yêu cầu của repo (`.nvmrc`, `engines`, `.python-version`, `global.json`, `.sdkmanrc`...) và đối chiếu version đang cài | P0 |
 | FR-3 | Kiểm tra dependencies: package manager có mặt, lockfile tồn tại, `node_modules`/venv/cache khớp | P0 |
-| FR-4 | Kiểm tra dịch vụ cục bộ: Docker daemon, Postgres/MySQL/Redis/Mongo (qua port hoặc `docker ps`) | P0 |
+| FR-4 | Kiểm tra dịch vụ cục bộ MVP: Docker daemon, PostgreSQL và Redis (qua port hoặc `docker compose ps`) | P0 |
 | FR-5 | Kiểm tra registry/credentials: npm registry, pip index, git user/SSH, credentials tồn tại (không đọc nội dung) | P1 |
 | FR-6 | Hai chế độ chẩn đoán `--mode=flat` (checklist) và `--mode=dep` (DAG + gom root cause) | P0 |
 | FR-7 | Output JSON chuẩn hóa ra stdout/file + exit code (0 pass, 1 có lỗi, 2 lỗi nội bộ / path không tồn tại) | P0 |
 | FR-8 | Remediation: mỗi check fail kèm các bước sửa chính xác (lệnh cụ thể) | P0 |
-| FR-9 | `--fix`: tự áp dụng các remediation an toàn có backup + log đầy đủ | P1 |
+| FR-9 | `--fix`: tự áp dụng remediation trong whitelist, có backup + log đầy đủ | P1 |
 | FR-10 | `setup-doctor study`: chạy nhiều repo, đối chiếu ground truth, tính metrics | P0 |
 | FR-11 | Không bao giờ tự sửa cấu hình developer khi không có `--fix` | P0 |
 | FR-12 | AI gợi ý remediation động: bật `--ai` → LLM đề xuất lệnh sửa theo evidence + OS; LLM lỗi/offline → fallback về remediation viết tay | P1 |
@@ -152,7 +152,7 @@ Xây một CLI tool **Developer Setup Doctor** đa nền tảng, kiểm tra **m�
 
 - **AC-1**: Với repo Node mẫu thiếu SDK + `node_modules`, `--mode=flat` liệt kê ≥ 1 lỗi; `--mode=dep` xác định root cause `node.sdk.version` và đánh dấu `node.deps.installed`, `node.build.ready` là `caused_by`.
 - **AC-2**: Output JSON khớp schema 1.0; `summary`, `checks`, `diagnosis` đúng cấu trúc.
-- **AC-3**: `--fix` tạo backup trước khi sửa; sau khi fix, repo build được; log ghi rõ mọi thay đổi.
+- **AC-3**: `--fix` backup file trước khi sửa, rollback thao tác reversible khi bước sau lỗi và ghi rõ thao tác non-reversible; sau khi fix phải chạy lại checks, xuất report/exit code của trạng thái cuối; log ghi rõ mọi thay đổi.
 - **AC-4**: `setup-doctor study` nhận ground truth JSON, xuất CSV/JSON với precision, recall, accuracy (tính trên universe `expected_failures ∪ expected_passes`), clarity đúng.
 - **AC-5**: Chạy check 2 lần trên cùng repo không làm thay đổi gì trên repo (mtime git status sạch nếu không có `--fix`).
 - **AC-6**: Với repo không phải ecosystem hỗ trợ, exit code 0 + message "no supported ecosystem detected".
@@ -213,16 +213,16 @@ Xây một CLI tool **Developer Setup Doctor** đa nền tảng, kiểm tra **m�
 2. Mỗi checker chạy, ghi kết quả vào `CheckContext` → trả `list[CheckResult]`.
 3. Engine nhận `list[CheckResult]` → nếu `flat`: sắp xếp theo nhóm; nếu `dep`: dựng DAG, gom root cause.
 4. *(Tùy chọn)* Nếu `--ai`: AI Remediation gợi ý lệnh sửa cho check fail; AI Explainer viết giải thích root cause — cả hai độc lập, có fallback, không ảnh hưởng logic chẩn đoán.
-5. Output định dạng → text ra terminal, JSON ra file/stdout, exit code.
-6. Nếu `--fix`: Fixer đọc report, backup, áp dụng remediation an toàn, cập nhật log.
-7. Nếu `--study`: Harness lặp bước 1-5 trên nhiều repo (luôn tắt AI), đối chiếu ground truth, xuất bảng metrics.
+5. Nếu `--fix`: Fixer đọc report, backup file, áp dụng remediation trong whitelist, cập nhật log; sau đó chạy lại bước 1-4 để lấy trạng thái cuối.
+6. Output report cuối → text ra terminal, JSON ra file/stdout, exit code theo report cuối.
+7. Nếu `--study`: Harness lặp các bước check (1-4, luôn tắt AI và không chạy fixer) trên nhiều repo, đối chiếu ground truth, xuất bảng metrics.
 
 ### 3.4 Kiến trúc hướng đơn vị nhỏ, tách bạch
 
 - Mỗi checker là một đơn vị độc lập: rõ mục đích, interface (`run(ctx) -> list[CheckResult]`), phụ thuộc duy nhất là `CheckContext`.
 - Engine tách khỏi checkers: engine chỉ làm việc trên `CheckResult` (không đọc file, không chạy lệnh) → dễ test bằng fixture `CheckResult`.
 - Fixer tách khỏi engine: engine chỉ chẩn đoán, fixer chỉ sửa — không trộn trách nhiệm.
-- Cải thiện codebase hiện tại: workspace hiện chỉ có `README.md` trống, nên không có refactor cần thiết.
+- Codebase hiện mới ở giai đoạn tài liệu thiết kế/kế hoạch; chưa có source code để refactor.
 
 ### 3.5 Xử lý lỗi
 
@@ -282,9 +282,9 @@ Xây một CLI tool **Developer Setup Doctor** đa nền tảng, kiểm tra **m�
 | `java.version` | JDK version đối chiếu `pom.xml`/`.sdkmanrc` | Sai major version | `winget install Temurin.<ver>.JDK` | `java.runtime.present` |
 | `java.maven.gradle.present` | Maven/Gradle/wrapper hiện diện (chỉ `which`/stat) | Thiếu tool | `winget install Apache.Maven` (Windows) | `java.runtime.present` |
 | `java.deps.cached` | Cache `.m2`/gradle cache tồn tại (chỉ stat dir) — **không** chạy `mvn dependency:resolve` khi check | Cache rỗng/thiếu | `mvn dependency:resolve` (--fix) | `java.maven.gradle.present` |
-| `java.build.ready` | Build file (`pom.xml`/`build.gradle`) hợp lệ (chỉ parse) | Thiếu/parse lỗi | Sửa theo log | `java.deps.cached` |
+| `java.build.ready` | Build file (`pom.xml`/`build.gradle`) hiện diện | Thiếu file | Kiểm tra lại nội dung repo | `java.deps.cached` |
 
-**Ghi chú read-only:** check **không chạy** `mvn dependency:resolve`/`mvn compile` (lệnh này tải deps + ghi cache → side-effect). Chỉ stat cache + parse file. Việc resolve chỉ xảy ra khi `--fix`.
+**Ghi chú read-only:** check **không chạy** `mvn dependency:resolve`/`mvn compile` (lệnh này tải deps + ghi cache → side-effect). MVP chỉ kiểm tra sự hiện diện build file và stat cache. Việc resolve chỉ xảy ra khi `--fix`.
 
 **3.7.4 .NET (`checkers/dotnet_ck.py`)**
 
@@ -293,9 +293,9 @@ Xây một CLI tool **Developer Setup Doctor** đa nền tảng, kiểm tra **m�
 | `dotnet.runtime.present` | `dotnet` trong PATH (chỉ `dotnet --list-sdks`) | Không tìm thấy | `winget install Microsoft.DotNet.SDK.8` (Windows) | — |
 | `dotnet.sdk.version` | `global.json`/SDK yêu cầu khớp `dotnet --list-sdks` | Thiếu SDK version | `winget install Microsoft.DotNet.SDK.<ver>` | `dotnet.runtime.present` |
 | `dotnet.restore.ready` | NuGet cache (`~/.<nuget>/packages`) tồn tại (chỉ stat) — **không** chạy `dotnet restore` khi check | Cache thiếu | `dotnet restore` (--fix) | `dotnet.sdk.version` |
-| `dotnet.build.ready` | Project file (`*.csproj`/`*.sln`) hiện diện + parse được | Thiếu/parse lỗi | Sửa theo log | `dotnet.restore.ready` |
+| `dotnet.build.ready` | Project file (`*.csproj`/`*.sln`) hiện diện ở repo root | Thiếu file | Kiểm tra lại nội dung repo | `dotnet.restore.ready` |
 
-**Ghi chú read-only:** check **không chạy** `dotnet restore`/`dotnet build` (có thể tải package + ghi disk). Chỉ stat cache + parse project file. Restore chỉ xảy ra khi `--fix`.
+**Ghi chú read-only:** check **không chạy** `dotnet restore`/`dotnet build` (có thể tải package + ghi disk). MVP chỉ kiểm tra project file ở repo root và stat cache. Restore chỉ xảy ra khi `--fix`.
 
 **3.7.5 Services (`checkers/services.py`)**
 
@@ -303,7 +303,7 @@ Xây một CLI tool **Developer Setup Doctor** đa nền tảng, kiểm tra **m�
 |---|---|---|---|---|
 | `services.container.present` | Docker daemon reachable (chỉ `docker info`) | Docker không chạy | Khởi động Docker Desktop (--fix) | — |
 | `services.compose.up` | `docker compose ps` đọc trạng thái (chỉ đọc, không up) | Container chưa chạy | `docker compose up -d` (--fix) | `services.container.present` |
-| `services.db.port` | Port DB (5432/3306/27017...) mở (TCP probe) | Port đóng | `docker compose up -d db` (--fix) | `services.compose.up` |
+| `services.db.port` | Port PostgreSQL 5432 mở khi compose có service `db` (TCP probe) | Port đóng | `docker compose up -d db` (--fix) | `services.compose.up` |
 | `services.redis` | Redis port (6379) mở (TCP probe) | Không kết nối | `docker compose up -d redis` (--fix) | `services.compose.up` |
 | `services.envfile` | `.env` tồn tại; nếu không → từ `.env.example` (chỉ stat) | Thiếu `.env` | Tạo từ template (--fix) | — |
 
@@ -316,9 +316,9 @@ Xây một CLI tool **Developer Setup Doctor** đa nền tảng, kiểm tra **m�
 | `registry.git.user` | `git config user.name/email` có (chỉ đọc) | Chưa cấu hình | **warning** | `git config --global user.name ...` | — |
 | `registry.git.ssh` | SSH key tồn tại (chỉ stat `~/.ssh`) — **skip khi remote là HTTPS** | Thiếu key + remote SSH | **warning** | `ssh-keygen` + thêm vào GitHub | — |
 | `registry.npm` | npm registry trỏ đúng (chỉ đọc config) — chỉ khi repo có `.npmrc` | Sai registry | error | `npm config set registry ...` | `node.runtime.present` |
-| `registry.pypi` | pip index trỏ đúng — chỉ khi repo có `pip.conf`/`.pypirc` | Sai index | error | `pip config set global.index-url ...` | `python.runtime.present` |
+| `registry.pypi` | File cấu hình pip (`pip.conf`/`pip.ini`) hiện diện — chỉ khi repo có file cấu hình | Thiếu file khi đã khai báo registry | error | Kiểm tra lại index thủ công | `python.runtime.present` |
 
-**Quy ước:** registry checker chỉ chạy khi repo là git repo **và** có ít nhất một trong: `.npmrc`, `pip.conf`/`.pypirc`, hoặc remote git. Git user/SSH là **warning** (không chặn build); chỉ `registry.npm`/`registry.pypi` là error khi repo khai báo registry riêng.
+**Quy ước:** registry checker chỉ chạy khi repo là git repo **và** có ít nhất một trong: `.npmrc`, `pip.conf`/`pip.ini`, hoặc remote git. Git user/SSH là **warning** (không chặn build); chỉ `registry.npm`/`registry.pypi` là error khi repo khai báo registry riêng.
 
 **Quy ước chung:** check `skip` khi ecosystem không liên quan; remediation có OS-specific variant (mặc định Windows); tuyệt đối không tự sửa credentials.
 
@@ -423,12 +423,12 @@ setup-doctor/
 **Quy tắc an toàn:**
 
 1. **Backup transaction-level:** trước khi chạy *bất kỳ* lệnh nào, backup **toàn bộ** các file sẽ bị ảnh hưởng (khai báo trong `files` của step) vào `.setup-doctor-backup/<timestamp: giờ-phút-giây.microgiây>/` — đủ phân giải vi mô để tránh trùng khi chạy 2 lần nhanh.
-2. **Rollback toàn bộ nếu lỗi:** nếu bước N fail → **rollback tất cả bước 1..N** (khôi phục file từ backup). Nếu có file/dir **mới tạo** ở bước trước → xóa chúng. Hệ thống về đúng trạng thái trước khi `--fix` (transaction semantics).
+2. **Rollback có giới hạn nếu lỗi:** nếu bước N fail → rollback các bước **reversible** đã apply (khôi phục file từ backup). Các bước install/restore/start-service là non-reversible, không hứa khôi phục trạng thái hệ thống và phải ghi rõ trong log.
 3. **Không chạy chuỗi tự do:** mọi lệnh là **argv list** (không phải chuỗi có `&&`/shell operator). Nếu cần ghép, dùng nhiều `RemediationStep` riêng.
 4. **Không backup thư mục lớn** (node_modules, .venv): các op này không nằm trong danh sách file cần backup; backup chỉ cho file cấu hình nhỏ (`.env`, `package-lock.json`...).
 5. **Không sửa credentials tự động:** op `set-git-identity` **không phải** `safe_fix` mặc định.
 6. **Log đầy đủ:** ghi mọi lệnh chạy, đường backup, kết quả vào fix log (in ra + lưu file).
-7. **Xóa file mới tạo khi rollback:** ghi danh sách path tồn tại trước khi chạy; sau fail, xóa các path không có trong danh sách (mới tạo).
+7. **Xóa file mới tạo có khai báo:** chỉ xóa file mới tạo khi đó là path file đơn được whitelist (ví dụ `.env`); không quét/xóa thư mục hoặc path ngoài danh sách `files`.
 
 **Ghi chú read-only vs `--fix`:** mọi op trong bảng trên đều **không** chạy trong lúc check; chỉ chạy khi `--fix`. Check chỉ đọc (xem 3.7).
 
@@ -450,7 +450,7 @@ setup-doctor --version
 | `--mode flat\|dep` | Chế độ chẩn đoán | `dep` |
 | `--format text\|json` | Định dạng output | `text` |
 | `--output <file>` | Ghi JSON ra file (chỉ dùng với `--format json`) | stdout |
-| `--fix` | Áp dụng remediation an toàn (có backup) | tắt |
+| `--fix` | Áp dụng remediation trong whitelist (có backup) | tắt |
 | `--ai` | Bật tăng cường AI (remediation động + giải thích root cause); cần API key từ env; bị bỏ qua trong `study` | tắt |
 | `--verbose` | Log chi tiết | tắt |
 | `study <repos_file>` | Chạy nghiên cứu nhiều repo | — |
@@ -587,7 +587,7 @@ Nghĩa của TP/FP/FN/TN (trên universe):
 - **TP**: tool báo fail, ground truth gán fail.
 - **FP**: tool báo fail, ground truth gán pass.
 - **FN**: tool báo pass/skip **hoặc không emit check**, ground truth gán fail (xem quy tắc 4.6 — ID trong GT luôn thuộc universe).
-- **TN**: tool báo pass, ground truth gán pass.
+- **TN**: tool không báo fail (pass/skip/không emit), ground truth tường minh gán pass.
 
 > **Lưu ý:** tool báo fail cho check *không nằm trong ground truth* (không được gán nhãn) → không tính vào FP (tránh phạt tool vì phát hiện thêm). Chỉ FP khi ground truth **tường minh** gán pass mà tool báo fail. Chỉ FN khi ground truth **tường minh** gán fail mà tool không báo fail.
 
@@ -684,7 +684,7 @@ def get_provider(cfg: ToolConfig) -> AIProvider: ...
 | **2. Checkers Node + Python** | 2 checker + seeded fixture repos (3-5 bộ/repo) + unit test + snapshot JSON | ≥ 90% seeded phát hiện đúng; pytest pass |
 | **3. Checkers còn lại** | Java, .NET, Services, Registry theo catalog 3.7 | Catalog đầy đủ; unit test pass |
 | **4. Diagnosis Engine** | Flat mode → dep mode (DAG từ `depends_on`, gom root cause, sort theo ảnh hưởng) | AC-1 pass |
-| **5. `--fix` an toàn** | Backup `.setup-doctor-backup/<ts>/`, whitelist `safe_fix`, log mọi thay đổi, rollback khi lỗi | AC-3, AC-5 pass |
+| **5. `--fix` có kiểm soát** | Backup `.setup-doctor-backup/<ts>/`, whitelist `safe_fix`, log mọi thay đổi, rollback thao tác reversible, re-check sau fix | AC-3, AC-5 pass |
 | **6. Config + AI Provider** | Config file + độ ưu tiên CLI>env>file; AI provider interface (openai/anthropic) + FakeProvider test | AC-10 pass; unit test AI pass (không gọi API thật) |
 | **7. AI Remediator + Explainer** | Gợi ý lệnh sửa động; giải thích root cause; fallback khi AI lỗi; giới hạn request | AC-7, AC-9 pass; fallback đúng |
 | **8. Research Harness** | Đọc repos + ground truth, chạy 2 mode, tính metrics, xuất CSV/JSON | AC-4, AC-8 pass |

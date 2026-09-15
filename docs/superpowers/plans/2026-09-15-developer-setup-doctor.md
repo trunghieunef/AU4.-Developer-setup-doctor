@@ -4,13 +4,13 @@
 
 **Goal:** Build `setup-doctor`, a Python CLI that diagnoses one repository's SDK, dependencies, and local-service prerequisites, prints exact remediation steps, emits machine-readable JSON + exit codes, compares flat vs dependency-aware diagnosis modes, and runs a repeatable research harness — with optional AI-enhanced remediation/explanation that stays isolated from research.
 
-**Architecture:** Plugin-style checker framework in Python 3.11+. Each ecosystem (node, python, java, dotnet, services, registry) is one read-only `Checker` class returning normalized `CheckResult` objects. A `DiagnosisEngine` consumes the same check results in two modes: `flat` (plain checklist) and `dep` (builds a DAG from `depends_on`, groups failures by root cause). Output layer renders text/JSON and computes exit codes. A `Fixer` applies only whitelisted `safe_fix` remediations with transactional backup + log + rollback. AI is an optional enhancement layer (`--ai`) with a provider interface and always-available rule-based fallback; the `study` harness is strictly rule-based/deterministic.
+**Architecture:** Plugin-style checker framework in Python 3.11+. Each ecosystem (node, python, java, dotnet, services, registry) is one read-only `Checker` class returning normalized `CheckResult` objects. A `DiagnosisEngine` consumes the same check results in two modes: `flat` (plain checklist) and `dep` (builds a DAG from `depends_on`, groups failures by root cause). Output layer renders text/JSON and computes exit codes. A `Fixer` applies only whitelisted `safe_fix` remediations with backup + log; rollback is guaranteed only for reversible file operations. AI is an optional enhancement layer (`--ai`) with a provider interface and always-available rule-based fallback; the `study` harness is strictly rule-based/deterministic.
 
 **Revision note (v1.2, sau review round 1):** plan đã được sửa theo review:
 - Checkers **read-only**: không chạy `mvn dependency:resolve`/`dotnet restore`/build trong check; thay bằng kiểm tra static (cache dir, parse file). Các op tải deps chỉ ở `--fix`.
 - ID check chuẩn hóa theo catalog spec 3.7: `*.deps.*`, `*.build.ready`, `*.restore.ready`, `*.deps.cached`...
 - Registry: git user/SSH là **warning**; chỉ chạy khi repo có dấu hiệu cần; SSH skip khi remote HTTPS.
-- Fixer thiết kế lại: whitelist op + transaction (backup toàn bộ, rollback toàn bộ, xóa file mới tạo, timestamp micro).
+- Fixer thiết kế lại: whitelist op + backup transaction, rollback file reversible, xóa file mới tạo, timestamp micro; thao tác install/restore/start-service ghi rõ non-reversible.
 - Config: tự tìm file (cwd → repo root → home); `--ai` ba trạng thái None/True/False.
 - AI: sanitize evidence, quota chung, validate schema.
 - Metrics: accuracy trên universe nhãn; path không tồn tại → exit 2.
@@ -393,6 +393,8 @@ def test_satisfies_unsupported_constraint_returns_none():
     assert satisfies("20.0.0", "lts/*") is None
     assert satisfies("20.0.0", "~dev") is None
     assert satisfies("", ">=20") is None          # không parse được version -> None
+    assert satisfies("20.0.0", ">=foo") is None
+    assert satisfies("20.0.0", "<foo") is None
 
 
 def test_parse_version_extracts_numbers():
@@ -514,13 +516,17 @@ def satisfies(installed: str, constraint: str) -> bool | None:
     # khử dấu v ở đầu
     single = single.lstrip("vV")
     if single.startswith(">="):
-        return iv >= parse_version(single[2:])
+        cv = parse_version(single[2:])
+        return None if not cv else iv >= cv
     if single.startswith(">"):
-        return iv > parse_version(single[1:])
+        cv = parse_version(single[1:])
+        return None if not cv else iv > cv
     if single.startswith("<="):
-        return iv <= parse_version(single[1:])
+        cv = parse_version(single[2:])
+        return None if not cv else iv <= cv
     if single.startswith("<"):
-        return iv < parse_version(single[1:])
+        cv = parse_version(single[1:])
+        return None if not cv else iv < cv
     if single.startswith("^"):
         cv = parse_version(single[1:])
         if not cv:
@@ -561,7 +567,7 @@ def detect_os() -> str:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/unit/test_utils.py -v`
-Expected: 5 PASSED
+Expected: 7 PASSED
 
 - [ ] **Step 5: Commit**
 
@@ -730,7 +736,7 @@ def _resolve_config_path(path, search_from) -> str | None:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/unit/test_config.py -v`
-Expected: 3 PASSED
+Expected: 5 PASSED
 
 - [ ] **Step 5: Commit**
 
@@ -1408,7 +1414,7 @@ class PythonChecker(Checker):
             remediation=[] if venv_ok else [
                 RemediationStep("Create a virtual environment", "py -m venv .venv",
                                 safe_fix=True, operation="create-venv",
-                                argv=["py", "-m", "venv", ".venv"], files=[".venv"]),
+                                argv=["py", "-m", "venv", ".venv"], files=[]),
             ],
             depends_on=["python.runtime.present"],
         ))
@@ -1656,7 +1662,7 @@ class JavaChecker(Checker):
             depends_on=["java.maven.gradle.present"],
         ))
 
-        # Read-only: build file (pom.xml/build.gradle) phải tồn tại + parse được (không chạy build).
+        # Read-only: build file (pom.xml/build.gradle) phải tồn tại (không chạy build).
         build_file = next((f for f in ("pom.xml", "build.gradle", "build.gradle.kts")
                            if os.path.isfile(os.path.join(ctx.repo_path, f))), None)
         if build_file is None:
@@ -1837,7 +1843,7 @@ class DotnetChecker(Checker):
             depends_on=["dotnet.sdk.version"],
         ))
 
-        # Read-only: kiểm tra build file tồn tại + parse được
+        # Read-only: kiểm tra build file tồn tại ở repo root
         proj_files = [f for f in os.listdir(ctx.repo_path)
                       if f.endswith((".sln", ".csproj", ".fsproj", ".vbproj")) and os.path.isfile(os.path.join(ctx.repo_path, f))]
         if not proj_files:
@@ -1954,8 +1960,12 @@ class ServicesChecker(Checker):
             path = os.path.join(repo, name)
             if os.path.isfile(path):
                 try:
-                    data = yaml.safe_load(open(path, encoding="utf-8"))
-                    return (data.get("services") or {}).keys()
+                    with open(path, encoding="utf-8") as f:
+                        data = yaml.safe_load(f)
+                    if not isinstance(data, dict):
+                        return []
+                    services = data.get("services")
+                    return services.keys() if isinstance(services, dict) else []
                 except yaml.YAMLError:
                     return []
         return []
@@ -2259,22 +2269,24 @@ class RegistryChecker(Checker):
                 evidence="no .npmrc in repo",
             ))
 
-        pypi = os.path.join(ctx.repo_path, "pip.conf")
-        if os.path.isfile(pypi):
+        pypi = next((os.path.join(ctx.repo_path, name)
+                     for name in ("pip.conf", "pip.ini")
+                     if os.path.isfile(os.path.join(ctx.repo_path, name))), None)
+        if pypi:
             py = which("py") or which("python")
             results.append(CheckResult(
-                check_id="registry.pypi", name="pip index configured",
+                check_id="registry.pypi", name="pip index file present",
                 ecosystem=self.ecosystem,
                 status=CheckStatus.PASS if py else CheckStatus.SKIP,
-                evidence="pip.conf exists" if py else "python not found",
+                evidence=f"{os.path.basename(pypi)} exists" if py else "python not found",
                 remediation=[RemediationStep("Point pip at the required index",
                                              "pip config set global.index-url <url>", safe_fix=False)],
             ))
         else:
             results.append(CheckResult(
-                check_id="registry.pypi", name="pip index configured",
+                check_id="registry.pypi", name="pip index file present",
                 ecosystem=self.ecosystem, status=CheckStatus.SKIP,
-                evidence="no pip.conf in repo",
+                evidence="no pip.conf/pip.ini in repo",
             ))
         return results
 ```
@@ -3014,7 +3026,9 @@ class Fixer:
             entry.status = "applied"
         else:
             entry.status = "failed"
-            entry.detail = res.stderr
+            entry.detail = res.stderr or "command failed"
+            if not op["reversible"]:
+                entry.detail += "; non-reversible operation: rollback unavailable"
 
     def apply(self, report: Report) -> FixReport:
         os.makedirs(self.backup_dir, exist_ok=True)
@@ -3575,6 +3589,18 @@ Expected: FAIL (`ModuleNotFoundError: No module named 'setup_doctor.study'`)
 from __future__ import annotations
 import json
 
+CATALOG_CHECK_IDS = {
+    "node.runtime.present", "node.sdk.version", "node.pkgmgr.present",
+    "node.lockfile.exists", "node.deps.installed", "node.build.ready",
+    "python.runtime.present", "python.version", "python.env.present",
+    "python.deps.installed", "python.build.ready",
+    "java.runtime.present", "java.version", "java.maven.gradle.present",
+    "java.deps.cached", "java.build.ready",
+    "dotnet.runtime.present", "dotnet.sdk.version", "dotnet.restore.ready",
+    "dotnet.build.ready", "services.container.present", "services.compose.up",
+    "services.db.port", "services.redis", "services.envfile",
+    "registry.git.user", "registry.git.ssh", "registry.npm", "registry.pypi",
+}
 
 def validate_ground_truth(data: dict, catalog_ids: set[str]) -> list[str]:
     """Kiểm tra ground truth: mọi ID trong expected_failures/passes/root_causes
@@ -3597,6 +3623,12 @@ def load_ground_truth(path: str) -> dict:
     for key in ("repo", "expected_failures"):
         if key not in data:
             raise ValueError(f"ground truth {path} thiếu field '{key}'")
+    overlap = set(data.get("expected_failures", [])) & set(data.get("expected_passes", []))
+    if overlap:
+        raise ValueError(f"ground truth {path} có ID vừa fail vừa pass: {sorted(overlap)}")
+    errors = validate_ground_truth(data, CATALOG_CHECK_IDS)
+    if errors:
+        raise ValueError("invalid ground truth: " + "; ".join(errors))
     return data
 ```
 
@@ -3677,6 +3709,7 @@ from ..registry import detect_ecosystems, get_checkers
 from ..context import CheckContext
 from ..utils.osdetect import detect_os
 from .metrics import compute_metrics
+from .ground_truth import load_ground_truth
 
 
 def _ground_truth_map(path: str) -> dict[str, dict]:
@@ -3686,11 +3719,15 @@ def _ground_truth_map(path: str) -> dict[str, dict]:
     p = Path(path)
     if p.is_dir():
         for f in sorted(p.glob("*.json")):
-            data = json.loads(f.read_text(encoding="utf-8"))
+            data = load_ground_truth(str(f))
             result[data["repo"]] = data
+            if data.get("local_path"):
+                result[data["local_path"]] = data
     else:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = load_ground_truth(path)
         result[data["repo"]] = data
+        if data.get("local_path"):
+            result[data["local_path"]] = data
     return result
 
 
@@ -3792,6 +3829,15 @@ def test_cli_check_no_ecosystem_exit_0(tmp_path):
     _json.loads(res.stdout)
 
 
+def test_cli_no_ecosystem_uses_json_from_config(tmp_path):
+    (tmp_path / "setup-doctor.toml").write_text(
+        "[output]\nformat = \"json\"\n", encoding="utf-8"
+    )
+    res = _run_cli(["check", str(tmp_path)])
+    assert res.returncode == 0
+    assert json.loads(res.stdout)["message"] == "no supported ecosystem detected"
+
+
 def test_cli_check_missing_path_exit_2(tmp_path):
     res = _run_cli(["check", str(tmp_path / "does-not-exist"), "--format", "json"])
     assert res.returncode == 2  # path không tồn tại -> lỗi input, KHÔNG phải no-ecosystem
@@ -3810,6 +3856,23 @@ def test_cli_check_json_ok(fake_runner, monkeypatch, tmp_path):
     from setup_doctor.cli import main
     rc = main(["check", str(tmp_path), "--format", "json"])
     assert rc == 0
+
+
+def test_cli_fix_outputs_report_after_recheck(monkeypatch, tmp_path, capsys):
+    from setup_doctor.cli import main
+    from setup_doctor.models import Report
+
+    reports = [
+        Report(repo_path=str(tmp_path), exit_code=1),
+        Report(repo_path=str(tmp_path), exit_code=0),
+    ]
+    monkeypatch.setattr("setup_doctor.cli.run_check", lambda *a, **k: reports.pop(0))
+    monkeypatch.setattr("setup_doctor.cli.Fixer", lambda path: type(
+        "FakeFixer", (), {"apply": lambda self, report: object()}
+    )())
+    assert main(["check", str(tmp_path), "--format", "json", "--fix"]) == 0
+    assert json.loads(capsys.readouterr().out)["exit_code"] == 0
+    assert reports == []
 ```
 
 Note on testing strategy: subprocess E2E (`test_cli_check_json_ok`) patches won't propagate into a child process, so the node-check scenario is tested **in-process** via `main([...])` with monkeypatched command utils, while pure-IO subprocess tests (`--version`, no-ecosystem) run as real processes. `cli.main` must return the exit code.
@@ -3966,6 +4029,10 @@ def main(argv: list[str] | None = None) -> int:
 def _emit_no_ecosystem(args, repo_path: str) -> None:
     """No-ecosystem: vẫn tôn trọng --format json để không phá vỡ machine-readable."""
     fmt = getattr(args, "format", None)
+    if fmt is None:
+        fmt = load_config(
+            path=getattr(args, "config", None), search_from=repo_path
+        ).output_format
     if fmt == "json":
         payload = json.dumps({
             "schema_version": "1.0",
@@ -3973,7 +4040,11 @@ def _emit_no_ecosystem(args, repo_path: str) -> None:
             "message": "no supported ecosystem detected",
             "exit_code": 0,
         }, indent=2)
-        print(payload)
+        if getattr(args, "output", None):
+            with open(args.output, "w", encoding="utf-8") as f:
+                f.write(payload)
+        else:
+            print(payload)
     else:
         print(f"no supported ecosystem detected for {repo_path}")
 
@@ -3984,8 +4055,20 @@ def _cmd_check(args) -> int:
         "format": args.format,
         "ai": args.ai,
     })
+    if args.output and args.format != "json" and config.output_format != "json":
+        raise ValueError("--output requires JSON format")
     mode = args.mode or config.default_mode
-    report = run_check(args.repo_path, mode, config, ai_enabled=bool(config.ai.enabled))
+    # Khi --fix, lần đầu chỉ cần remediation viết tay; AI chỉ chạy cho report cuối.
+    report = run_check(
+        args.repo_path, mode, config,
+        ai_enabled=bool(config.ai.enabled) and not args.fix,
+    )
+    fix = None
+    if args.fix:
+        fix = Fixer(args.repo_path).apply(report)
+        report = run_check(
+            args.repo_path, mode, config, ai_enabled=bool(config.ai.enabled)
+        )
     use_json = args.format == "json" or (args.format is None and config.output_format == "json")
     if use_json:
         payload = render_json(report)
@@ -3996,11 +4079,9 @@ def _cmd_check(args) -> int:
             print(payload)
     else:
         print(render_text(report))
-    if args.fix:
-        fix = Fixer(args.repo_path).apply(report)
-        if args.verbose:
-            for e in fix.entries:
-                print(f"fix: {e.status} -> {e.command} {e.detail}")
+    if fix is not None and args.verbose:
+        for e in fix.entries:
+            print(f"fix: {e.status} -> {e.command} {e.detail}", file=sys.stderr)
     return report.exit_code
 
 
@@ -4042,7 +4123,7 @@ setup-doctor check <repo>                  # chẩn đoán (mặc định mode=d
 setup-doctor check <repo> --mode flat      # checklist phẳng
 setup-doctor check <repo> --format json    # JSON machine-readable
 setup-doctor check <repo> --format json --output report.json  # ghi JSON ra file
-setup-doctor check <repo> --fix            # áp dụng remediation an toàn (có backup)
+setup-doctor check <repo> --fix            # áp dụng remediation trong whitelist (có backup)
 setup-doctor check <repo> --ai             # tăng cường AI (cần SETUP_DOCTOR_API_KEY)
 setup-doctor study repos.txt --ground-truth research/ground_truth --output-dir research/output
 setup-doctor --version
@@ -4057,8 +4138,9 @@ Exit codes: `0` pass/không-ecosystem, `1` có lỗi (severity error), `2` lỗi
 ## An toàn
 
 - Mặc định `read-only`: chạy check không thay đổi repo.
-- `--fix` chỉ áp dụng các remediation `safe_fix` + `source=manual`, backup vào
-  `.setup-doctor-backup/<ts>/`, log mọi thay đổi, rollback khi lệnh lỗi.
+- `--fix` chỉ áp dụng remediation `safe_fix` + `source=manual` nằm trong whitelist, backup vào
+  `.setup-doctor-backup/<ts>/`, log mọi thay đổi. Chỉ operation reversible mới rollback được;
+  install/restore/start-service có thể không đảo ngược và phải ghi rõ trong log.
 - AI chỉ gửi `check_id`/evidence đã lọc/OS; key đọc từ env; nghiên cứu (`study`) luôn
   chạy rule-based (deterministic).
 
