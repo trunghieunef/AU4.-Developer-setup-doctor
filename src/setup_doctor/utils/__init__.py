@@ -1,0 +1,1 @@
+"""Shared helpers for command execution, version logic, and OS detection."""
