@@ -1,0 +1,1 @@
+"""Checker plugins. Each module defines one Checker subclass per ecosystem."""
