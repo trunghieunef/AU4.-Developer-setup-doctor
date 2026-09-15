@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "repo_path": "/repo",
+  "os": "windows",
+  "mode": "dep",
+  "summary": {"total": 2, "pass": 0, "fail": 2, "skip": 0, "warnings": 0},
+  "checks": [
+    {
+      "check_id": "sdk",
+      "name": "SDK",
+      "ecosystem": "node",
+      "severity": "error",
+      "status": "fail",
+      "evidence": "node v18 expected >=20",
+      "remediation": [{"step": "Install node 22", "command": "nvm install 22", "safe_fix": false, "source": "manual", "files": [], "operation": null, "argv": null}],
+      "depends_on": ["runtime"],
+      "caused_by": null,
+      "causes": ["sdk"]
+    },
+    {
+      "check_id": "deps",
+      "name": "Deps",
+      "ecosystem": "node",
+      "severity": "error",
+      "status": "fail",
+      "evidence": "missing",
+      "remediation": [],
+      "depends_on": ["sdk"],
+      "caused_by": "sdk",
+      "causes": ["sdk"]
+    }
+  ],
+  "diagnosis": {
+    "root_causes": [
+      {
+        "cause_check_id": "sdk",
+        "message": "SDK is a root cause of 2 failing check(s)",
+        "affected_checks": ["sdk", "deps"],
+        "chain": "sdk → deps"
+      }
+    ],
+    "ai_explanation": null
+  },
+  "exit_code": 1
+}
