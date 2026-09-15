@@ -133,3 +133,50 @@ def test_python_deps_fail_when_venv_missing(fake_runner, monkeypatch, tmp_path):
     by_id = {r.check_id: r for r in results}
     assert by_id["python.env.present"].status == CheckStatus.FAIL
     assert by_id["python.deps.installed"].status == CheckStatus.FAIL
+
+
+# ---------------- Java section ----------------
+from setup_doctor.checkers.java import JavaChecker
+from setup_doctor.models import Severity
+
+
+def _java_patch(fake_runner, monkeypatch):
+    monkeypatch.setattr("setup_doctor.checkers.java.which",
+                        lambda name: "C:\\java\\java.exe" if name == "java" else ("C:\\maven\\mvn.cmd" if name == "mvn" else None))
+    monkeypatch.setattr("setup_doctor.checkers.java.run_command", fake_runner)
+    monkeypatch.setattr("setup_doctor.checkers.java._m2_cache_exists", lambda home: True)
+    return "C:\\java\\java.exe"
+
+
+def test_java_pass(fake_runner, monkeypatch, tmp_path):
+    repo = _node_context(tmp_path, {"pom.xml": "<project><properties><maven.compiler.release>17</maven.compiler.release></properties></project>"})
+    exe = _java_patch(fake_runner, monkeypatch)
+    fake_runner.set([exe, "-version"], CommandResult(0, "openjdk version \"17.0.9\" 2023-10-17", ""))
+    results = JavaChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    # cache có -> java.deps.cached là WARNING (pass nhưng severity warning)
+    assert {r.check_id for r in results if r.status == CheckStatus.FAIL} == set()
+    cached = next(r for r in results if r.check_id == "java.deps.cached")
+    assert cached.severity == Severity.WARNING
+    assert cached.status == CheckStatus.PASS
+
+
+def test_java_fail_version(fake_runner, monkeypatch, tmp_path):
+    repo = _node_context(tmp_path, {"pom.xml": "<project><properties><maven.compiler.release>21</maven.compiler.release></properties></project>"})
+    exe = _java_patch(fake_runner, monkeypatch)
+    fake_runner.set([exe, "-version"], CommandResult(0, 'openjdk version "11.0.20" 2023-07-18', ""))
+    results = JavaChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    assert {r.check_id for r in results if r.status == CheckStatus.FAIL} == {"java.version"}
+
+
+def test_java_runtime_version_fails_is_error(fake_runner, monkeypatch, tmp_path):
+    repo = _node_context(tmp_path, {"pom.xml": "<project/>"})
+    exe = "C:\\java\\java.exe"
+    monkeypatch.setattr("setup_doctor.checkers.java.which",
+                        lambda name: exe if name == "java" else None)
+    monkeypatch.setattr("setup_doctor.checkers.java.run_command", fake_runner)
+    fake_runner.set([exe, "-version"], CommandResult(1, "", "error: invalid flag"))
+    results = JavaChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    by_id = {r.check_id: r for r in results}
+    # runtime fail là gốc; downstream (maven/gradle, deps.cached) cũng fail theo
+    assert by_id["java.runtime.present"].status == CheckStatus.FAIL
+    assert by_id["java.version"].status == CheckStatus.SKIP  # bị skip vì runtime hỏng
