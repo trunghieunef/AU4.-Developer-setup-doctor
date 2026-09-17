@@ -32,6 +32,15 @@ def test_detect_skips_vendor_dirs(tmp_path):
     assert detect_ecosystems(str(repo)) == {"node"}
 
 
+def test_detect_skips_test_and_backup_dirs(tmp_path):
+    repo = make_repo(tmp_path, [
+        "pyproject.toml",
+        ".pytest-tmp/fixture/pom.xml",
+        ".setup-doctor-backup/stamp/App.csproj",
+    ])
+    assert detect_ecosystems(str(repo)) == {"python"}
+
+
 def test_get_checkers_returns_only_matching_ecosystems():
     checkers = get_checkers({"node"})
     eco = {c.ecosystem for c in checkers}

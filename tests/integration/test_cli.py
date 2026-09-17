@@ -28,6 +28,14 @@ def test_cli_check_no_ecosystem_exit_0(tmp_path):
     assert data["exit_code"] == 0
 
 
+def test_cli_no_ecosystem_writes_requested_json_output(tmp_path):
+    output = tmp_path / "report.json"
+    res = _run_cli(["check", str(tmp_path), "--format", "json", "--output", str(output)])
+    assert res.returncode == 0
+    assert res.stdout == ""
+    assert json.loads(output.read_text(encoding="utf-8"))["message"] == "no supported ecosystem detected"
+
+
 def test_cli_check_missing_path_exit_2(tmp_path):
     res = _run_cli(["check", str(tmp_path / "does-not-exist"), "--format", "json"])
     assert res.returncode == 2  # path không tồn tại -> lỗi input, KHÔNG phải no-ecosystem

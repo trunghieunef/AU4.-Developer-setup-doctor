@@ -25,13 +25,17 @@ class PythonChecker(Checker):
 
     def run(self, ctx):
         results = []
-        py_exe = which("py") or which("python")
+        candidates = [exe for exe in (which("py"), which("python")) if exe]
+        py_exe = candidates[0] if candidates else None
         present = py_exe is not None
         version = ""
         version_ok = True
         if present:
-            res = run_command([py_exe, "--version"], timeout=10)
-            version = res.stdout
+            for candidate in candidates:
+                res = run_command([candidate, "--version"], timeout=10)
+                if res.ok and res.stdout:
+                    py_exe, version = candidate, res.stdout
+                    break
             version_ok = res.ok and bool(version)  # exe có nhưng --version fail -> FAIL (#5)
         results.append(CheckResult(
             check_id="python.runtime.present", name="Python runtime present",

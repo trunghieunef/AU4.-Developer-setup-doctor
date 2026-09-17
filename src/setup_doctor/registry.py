@@ -11,7 +11,8 @@ _CHECK_MARKERS = {
     "services": ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml", ".env.example"),
 }
 
-_SKIP_DIRS = {"node_modules", "venv", ".venv", "__pycache__", ".git", ".idea", ".vscode"}
+_SKIP_DIRS = {"node_modules", "venv", ".venv", "__pycache__", ".git", ".idea", ".vscode",
+              ".pytest-tmp", ".setup-doctor-backup"}
 
 # Plugin-style: checker đăng ký qua entry points group "setup_doctor.checkers".
 # Thêm checker mới = thêm 1 module + khai báo entry point trong pyproject.toml,

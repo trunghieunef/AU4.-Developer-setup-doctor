@@ -5,6 +5,13 @@ import re
 _VERSION_RE = re.compile(r"(\d+(?:\.\d+){0,3})")
 
 
+def _compare(left: tuple[int, ...], right: tuple[int, ...]) -> int:
+    width = max(len(left), len(right))
+    left = left + (0,) * (width - len(left))
+    right = right + (0,) * (width - len(right))
+    return (left > right) - (left < right)
+
+
 def parse_version(s: str) -> tuple[int, ...]:
     """Extract the first dotted-numeric version from a string."""
     match = _VERSION_RE.search(s or "")
@@ -56,30 +63,30 @@ def satisfies(installed: str, constraint: str) -> bool | None:
     single = single.lstrip("vV")
     if single.startswith(">="):
         cv = parse_version(single[2:])
-        return None if not cv else iv >= cv
+        return None if not cv else _compare(iv, cv) >= 0
     if single.startswith(">"):
         cv = parse_version(single[1:])
-        return None if not cv else iv > cv
+        return None if not cv else _compare(iv, cv) > 0
     if single.startswith("<="):
         cv = parse_version(single[2:])
-        return None if not cv else iv <= cv
+        return None if not cv else _compare(iv, cv) <= 0
     if single.startswith("<"):
         cv = parse_version(single[1:])
-        return None if not cv else iv < cv
+        return None if not cv else _compare(iv, cv) < 0
     if single.startswith("^"):
         cv = parse_version(single[1:])
         if not cv:
             return None
-        return iv[0] == cv[0] and iv >= cv
+        return iv[0] == cv[0] and _compare(iv, cv) >= 0
     if single.startswith("~"):
         cv = parse_version(single[1:])
         if not cv:
             return None
         # ~X.Y.Z -> >= X.Y.Z, < X.(Y+1).0
         if len(cv) >= 2:
-            return iv >= cv and iv < (cv[0], cv[1] + 1, 0)
-        return iv >= cv
+            return _compare(iv, cv) >= 0 and _compare(iv, (cv[0], cv[1] + 1, 0)) < 0
+        return _compare(iv, cv) >= 0
     cv = parse_version(single)
     if not cv:
         return None  # không parse được constraint (vd "~dev") -> chưa xác định
-    return iv >= cv  # plain major = minimum major
+    return _compare(iv, cv) >= 0  # plain major = minimum major

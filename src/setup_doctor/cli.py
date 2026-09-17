@@ -86,7 +86,11 @@ def _emit_no_ecosystem(args, repo_path: str) -> None:
             "message": "no supported ecosystem detected",
             "exit_code": 0,
         }, indent=2, ensure_ascii=False)
-        print(payload)
+        if getattr(args, "output", None):
+            with open(args.output, "w", encoding="utf-8") as f:
+                f.write(payload)
+        else:
+            print(payload)
     else:
         print(f"no supported ecosystem detected for {repo_path}")
 

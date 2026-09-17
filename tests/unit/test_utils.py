@@ -54,6 +54,14 @@ def test_satisfies_operator_with_space_after():
     assert satisfies("20.4.9", "~ 20.4.0")
     assert satisfies("18.1.0", "< 20.0.0")
 
+
+def test_satisfies_treats_missing_version_parts_as_zero():
+    assert satisfies("3.11", ">=3.11.0")
+    assert satisfies("3.11", "<=3.11.0")
+    assert satisfies("3.11", "~3.11.0")
+    assert not satisfies("3.11", ">3.11.0")
+
+
 def test_parse_version_extracts_numbers():
     assert parse_version("Node.js v20.11.1") == (20, 11, 1)
     assert parse_version("") == ()

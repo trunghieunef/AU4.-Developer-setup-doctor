@@ -132,6 +132,21 @@ def test_python_runtime_version_fails_is_error(fake_runner, monkeypatch, tmp_pat
     assert by_id["python.runtime.present"].status == CheckStatus.FAIL
 
 
+def test_python_falls_back_when_py_launcher_fails(fake_runner, monkeypatch, tmp_path):
+    repo = _node_context(tmp_path, {"pyproject.toml": "[project]\n"})
+    monkeypatch.setattr(
+        "setup_doctor.checkers.python_ck.which",
+        lambda name: "C:\\Python\\py.exe" if name == "py" else "C:\\Python\\python.exe",
+    )
+    monkeypatch.setattr("setup_doctor.checkers.python_ck.run_command", fake_runner)
+    fake_runner.set(["C:\\Python\\py.exe", "--version"], CommandResult(1, "", "no Python"))
+    fake_runner.set(["C:\\Python\\python.exe", "--version"], CommandResult(0, "Python 3.12.1", ""))
+    results = PythonChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    runtime = next(r for r in results if r.check_id == "python.runtime.present")
+    assert runtime.status == CheckStatus.PASS
+    assert runtime.evidence.endswith("C:\\Python\\python.exe")
+
+
 def test_python_deps_fail_when_venv_missing(fake_runner, monkeypatch, tmp_path):
     # Có requirements.txt nhưng không có .venv -> deps phải FAIL (không PASS vì không kiểm tra được)
     repo = _node_context(tmp_path, {
@@ -281,6 +296,15 @@ def test_services_missing_docker_is_fail(fake_runner, monkeypatch, tmp_path):
     results = ServicesChecker().run(CheckContext(repo_path=str(repo), os="windows"))
     by_id = {r.check_id: r for r in results}
     assert by_id["services.container.present"].status == CheckStatus.FAIL
+
+
+def test_services_invalid_compose_is_not_silently_skipped(monkeypatch, tmp_path):
+    repo = _node_context(tmp_path, {"docker-compose.yml": "services: [not-a-mapping]"})
+    monkeypatch.setattr("setup_doctor.checkers.services.which", lambda name: None)
+    results = ServicesChecker().run(CheckContext(repo_path=str(repo), os="windows"))
+    by_id = {r.check_id: r for r in results}
+    assert by_id["services.compose.up"].status == CheckStatus.FAIL
+    assert "invalid compose" in by_id["services.compose.up"].evidence
 
 
 # ---------------- Registry section ----------------

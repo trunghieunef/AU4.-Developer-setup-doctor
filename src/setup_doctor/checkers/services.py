@@ -27,16 +27,18 @@ class ServicesChecker(Checker):
                     with open(path, encoding="utf-8") as f:
                         data = yaml.safe_load(f)
                     if not isinstance(data, dict):
-                        return []
+                        return None
                     services = data.get("services")
-                    return services.keys() if isinstance(services, dict) else []
+                    return services.keys() if isinstance(services, dict) else None
                 except yaml.YAMLError:
-                    return []
+                    return None
         return []
 
     def run(self, ctx):
         results = []
-        has_compose = bool(self._compose_services(ctx.repo_path))
+        services = self._compose_services(ctx.repo_path)
+        compose_invalid = services is None
+        has_compose = compose_invalid or bool(services)
         docker = which("docker")
         if docker is not None:
             docker_ok = run_command([docker, "info"], timeout=10).ok
@@ -57,8 +59,16 @@ class ServicesChecker(Checker):
             ],
         ))
 
-        expected = set(self._compose_services(ctx.repo_path))
-        if docker_ok and expected:
+        expected = set(services or ())
+        if compose_invalid:
+            results.append(CheckResult(
+                check_id="services.compose.up", name="Compose services running",
+                ecosystem=self.ecosystem, status=CheckStatus.FAIL,
+                evidence="invalid compose file or missing services mapping",
+                remediation=[RemediationStep("Fix the compose file syntax", "", safe_fix=False)],
+                depends_on=["services.container.present"],
+            ))
+        elif docker_ok and expected:
             res = run_command([docker, "compose", "ps", "--format", "{{.Name}}"], cwd=ctx.repo_path, timeout=30)
             running = set(res.stdout.splitlines())
             # Container name = <project>-<service>-1; so theo PREFIX (không đòi khớp chính xác) (#5)

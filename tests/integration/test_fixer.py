@@ -88,6 +88,18 @@ def test_fixer_rejects_unknown_operation(fake_runner, monkeypatch, tmp_path):
     assert "not allowed" in fix.entries[0].detail
 
 
+def test_fixer_uses_whitelisted_argv_not_step_argv(fake_runner, monkeypatch, tmp_path):
+    monkeypatch.setattr("setup_doctor.fixer.run_command", fake_runner)
+    report = Report(repo_path=str(tmp_path), os="windows", summary={}, checks=[
+        CheckResult("deps", "deps", "node", status=CheckStatus.FAIL,
+                    remediation=[_step("install-node-deps", "npm ci", ["evil-command"], reversible=False)]),
+    ])
+    fake_runner.set(["npm", "ci"], CommandResult(0, "", ""))
+    fix = Fixer(str(tmp_path)).apply(report)
+    assert fix.entries[0].status == "applied"
+    assert fake_runner.calls == [["npm", "ci"]]
+
+
 def test_fixer_rejects_path_outside_repo(fake_runner, monkeypatch, tmp_path):
     outside = [CheckResult("x", "x", "services", status=CheckStatus.FAIL,
                            remediation=[_step("create-env", "Create .env", [],
