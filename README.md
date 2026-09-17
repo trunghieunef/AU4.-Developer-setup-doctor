@@ -36,9 +36,11 @@ Ví dụ: thiếu SDK khiến deps không cài được → `dep` gom thành **1
 
 ### 📦 Output đa dạng cho người và máy
 
-- **Terminal** — human-readable, dấu `[PASS]/[FAIL]/[SKIP]`, kèm bước sửa và root-cause chain
+- **Terminal** — giao diện Rich có màu: header tổng quan, bảng check, `HOW TO FIX`, `ROOT CAUSES`, spinner khi đang kiểm tra và panel kết quả cho `study`/`--fix`
 - **JSON** — machine-readable, schema ổn định (`schema_version: 1.0`), dùng được cho CI/script
 - **Exit code chuẩn** — `0` pass, `1` có lỗi, `2` lỗi input/nội bộ
+
+> `--format json` luôn xuất JSON thuần, không lẫn màu, spinner hay panel để dùng an toàn trong CI/script.
 
 ### 🛠️ `--fix` tự sửa an toàn (có kiểm soát)
 
@@ -75,7 +77,7 @@ Ví dụ: thiếu SDK khiến deps không cài được → `dep` gom thành **1
 ## Cài đặt
 
 ```bash
-# Phát triển (kèm pytest)
+# Phát triển (kèm pytest và Rich terminal UI)
 pip install -e ".[dev]"
 
 # Hoặc bản thường
@@ -108,30 +110,38 @@ setup-doctor study repos.txt --ground-truth research/ground_truth --output-dir r
 
 # Phiên bản
 setup-doctor --version
+
+# Xem toàn bộ lệnh và tuỳ chọn
+setup-doctor --help
 ```
 
-### Ví dụ output thực tế (repo `expressjs/express` sau khi clone)
+### Ví dụ terminal UI (repo `expressjs/express` sau khi clone)
 
 ```
-setup-doctor report (mode: dep)
-repo: C:\tmp\sd-repo-express | os: windows
-summary: {'total': 10, 'pass': 4, 'fail': 2, 'skip': 4, 'warnings': 0}
-[PASS] node.runtime.present:  node v24.14.1 at C:\Program Files\nodejs\node.EXE
-[PASS] node.sdk.version:      node v24.14.1 expected >= 18
-[PASS] node.pkgmgr.present:   npm at C:\Program Files\nodejs\npm.CMD
-[FAIL] node.lockfile.exists:  no lockfile found
-    fix 1: Generate lockfile -> npm install --package-lock-only
-[FAIL] node.deps.installed:   node_modules missing
-    fix 1: Install dependencies from lockfile -> npm ci
-[SKIP] node.build.ready: no build script declared
-[PASS] registry.git.user: user.name/email set
-[SKIP] registry.git.ssh: remote uses HTTPS; no SSH key needed
-[SKIP] registry.npm: npm not found or no registry line in .npmrc
-[SKIP] registry.pypi: no pip.conf/pip.ini in repo
-root causes:
-  - node.lockfile.exists: Lockfile exists is a root cause of 2 failing check(s)
-    (chain: node.lockfile.exists -> node.deps.installed)
-exit_code: 1
+╭──────────────────────────── SETUP DOCTOR ────────────────────────────╮
+│ Setup needs attention                                                 │
+│ C:\tmp\sd-repo-express | windows | dep diagnosis                     │
+│ 4 passed  2 failed  4 skipped                                         │
+╰──────────────────────────────────────────────────────────────────────╯
+┏━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Status ┃ Check                  ┃ Evidence                           ┃
+┡━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ PASS   │ node.runtime.present   │ node v24.14.1 found                │
+│ FAIL   │ node.lockfile.exists  │ no lockfile found                  │
+│ FAIL   │ node.deps.installed   │ node_modules missing               │
+│ SKIP   │ node.build.ready      │ no build script declared           │
+└────────┴────────────────────────┴────────────────────────────────────┘
+╭───────────────────────────── HOW TO FIX ─────────────────────────────╮
+│ Lockfile exists                                                       │
+│   1. Generate lockfile  $ npm install --package-lock-only             │
+│ Dependencies installed                                                │
+│   1. Install dependencies  $ npm ci                                   │
+╰──────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────── ROOT CAUSES ─────────────────────────────╮
+│ Lockfile exists is a root cause of 2 failing check(s)                 │
+│   node.lockfile.exists -> node.deps.installed                         │
+╰──────────────────────────────────────────────────────────────────────╯
+Exit code: 1
 ```
 
 > **Cách đọc:** tool chỉ **đọc** (không tự sửa). `--fix` mới thay đổi — và chỉ với operation trong whitelist.
@@ -206,7 +216,7 @@ format = "text"            # text | json
 # Cài editable + dev deps
 pip install -e ".[dev]"
 
-# Chạy toàn bộ test (81 tests)
+# Chạy toàn bộ test (83 tests)
 python -m pytest
 
 # Chạy theo nhóm
@@ -225,7 +235,7 @@ src/setup_doctor/
 ├── registry.py       # Phát hiện ecosystem + plugin checker (entry points)
 ├── runner.py         # Pipeline: validate → detect → checkers → engine → AI
 ├── engine.py         # Flat mode + dep mode (DAG, root causes)
-├── output.py         # Text / JSON renderer
+├── output.py         # Rich terminal UI / JSON renderer
 ├── fixer.py          # --fix: whitelist op, backup, reversible-only rollback
 ├── checkers/         # 6 checker read-only (plugin-style)
 ├── ai/               # Provider + remediation + explainer (opt-in)

@@ -7,7 +7,7 @@ name = "setup-doctor"
 version = "0.1.0"
 description = "Developer Setup Doctor: diagnose repo SDK/deps/service prerequisites with exact remediation steps"
 requires-python = ">=3.11"
-dependencies = ["PyYAML>=6.0"]
+dependencies = ["PyYAML>=6.0", "rich>=13.0"]
 
 [project.optional-dependencies]
 ai = ["openai>=1.0", "anthropic>=0.25"]

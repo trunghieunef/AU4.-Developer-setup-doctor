@@ -6,7 +6,15 @@ import os
 import sys
 from . import __version__
 from .config import load_config
-from .output import render_text, render_json
+from .output import (
+    print_error,
+    print_fix_report,
+    print_notice,
+    print_report,
+    print_study_complete,
+    render_json,
+    run_with_status,
+)
 from .runner import run_check, NoEcosystemError, RepoPathError
 from .fixer import Fixer
 from .study.runner import run_study
@@ -52,21 +60,25 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_check(args)
         if args.command == "study":
             if not os.path.isfile(args.repos_file):
-                print(f"setup-doctor: repos file not found: {args.repos_file}", file=sys.stderr)
+                print_error(f"Repos file not found: {args.repos_file}")
                 return 2
-            run_study(args.repos_file, args.ground_truth, args.output_dir)
+            csv_path = run_with_status(
+                "Running flat vs dep study...",
+                lambda: run_study(args.repos_file, args.ground_truth, args.output_dir),
+            )
+            print_study_complete(csv_path)
             return 0
     except NoEcosystemError as exc:
         # Repo không hỗ trợ: exit 0, output đúng format đã chọn (kể cả JSON).
         _emit_no_ecosystem(args, exc.repo_path)
         return 0
     except RepoPathError as exc:
-        print(f"setup-doctor: invalid repo path: {exc}", file=sys.stderr)
+        print_error(f"Invalid repository path: {exc}")
         return 2
     except KeyboardInterrupt:
         return 130
     except Exception as exc:  # internal tool error -> exit 2
-        print(f"setup-doctor: internal error: {exc}", file=sys.stderr)
+        print_error(f"Internal error: {exc}")
         if getattr(args, "verbose", False):
             import traceback
             traceback.print_exc()
@@ -88,7 +100,7 @@ def _emit_no_ecosystem(args, repo_path: str) -> None:
         }, indent=2, ensure_ascii=False)
         print(payload)
     else:
-        print(f"no supported ecosystem detected for {repo_path}")
+        print_notice(f"No supported ecosystem detected for:\n[bold]{repo_path}[/]")
 
 
 def _cmd_check(args) -> int:
@@ -98,16 +110,16 @@ def _cmd_check(args) -> int:
         "ai": args.ai,
     })
     mode = args.mode or config.default_mode
-    report = run_check(args.repo_path, mode, config, ai_enabled=bool(config.ai.enabled))
+    use_json = args.format == "json" or (args.format is None and config.output_format == "json")
+    run = lambda: run_check(args.repo_path, mode, config, ai_enabled=bool(config.ai.enabled))
+    report = run() if use_json else run_with_status("Running setup checks...", run)
     if args.fix:
         fix = Fixer(args.repo_path).apply(report)
-        if args.verbose:
-            for e in fix.entries:
-                print(f"fix: {e.status} -> {e.command} {e.detail}")
+        if not use_json:
+            print_fix_report(fix)
         # AC-3 / spec data flow 3.3: sau khi fix phải chạy lại checks để lấy trạng thái cuối
         # (exit code phản ánh kết quả SAU fix, không phải trước fix).
-        report = run_check(args.repo_path, mode, config, ai_enabled=bool(config.ai.enabled))
-    use_json = args.format == "json" or (args.format is None and config.output_format == "json")
+        report = run() if use_json else run_with_status("Verifying safe fixes...", run)
     if use_json:
         payload = render_json(report)
         if args.output:
@@ -116,7 +128,7 @@ def _cmd_check(args) -> int:
         else:
             print(payload)
     else:
-        print(render_text(report))
+        print_report(report)
     return report.exit_code
 
 
