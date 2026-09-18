@@ -1,264 +1,254 @@
 # Developer Setup Doctor
 
-> Bác sĩ thiết lập môi trường cho nhà phát triển — chẩn đoán một repository về SDK, dependencies và dịch vụ cục bộ, đưa ra bước khắc phục chính xác và kết quả machine-readable (JSON + exit code).
+CLI chẩn đoán môi trường phát triển cho repository. Tool tự nhận diện ecosystem, kiểm tra SDK/dependency/service cục bộ, nhóm lỗi theo nguyên nhân gốc, và đưa ra remediation có thể đọc bởi người hoặc máy.
 
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
-[![Platform](https://img.shields.io/badge/platform-Windows%20first-lightgrey)](docs/superpowers/specs/2026-09-15-developer-setup-doctor-design.md)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+> `check` mặc định là read-only. Chỉ `--fix` mới thực hiện thay đổi, và chỉ với các operation đã được whitelist.
 
----
+## Điểm nổi bật
 
-## Tính năng
+- Phát hiện Node.js, Python, Java, .NET, Docker Compose/services và registry configuration từ marker file.
+- Hai chế độ chẩn đoán: checklist phẳng (`flat`) hoặc dependency graph/root cause (`dep`, mặc định).
+- Terminal UI dùng Rich; JSON thuần cho CI và automation.
+- AI tùy chọn: bổ sung gợi ý remediation, có nhãn `[AI]`, quota chung, sanitize evidence và fallback rule-based.
+- `--fix` có operation whitelist, backup file liên quan, kiểm tra path traversal và re-check sau khi sửa.
+- `study` để so sánh `flat`/`dep` với ground truth và xuất CSV/JSON metrics.
 
-### 🧩 Chẩn đoán đa nền tảng codebase (read-only)
+## Hỗ trợ hiện tại
 
-Phát hiện ecosystem tự động qua marker file và kiểm tra các điều kiện tiên quyết **mà không sửa gì**:
-
-| Ecosystem | Marker được phát hiện | Kiểm tra chính |
+| Ecosystem | Marker | Các kiểm tra chính |
 |---|---|---|
-| **Node.js** | `package.json` | version theo `engines`/`.nvmrc`, npm, lockfile, `node_modules`, build tool |
-| **Python** | `pyproject.toml`, `requirements.txt` | version theo `requires-python`/`.python-version`, venv (`pyvenv.cfg`), deps |
-| **Java** | `pom.xml`, `build.gradle` | JDK version, Maven/Gradle/wrapper, cache `.m2`, build file |
-| **.NET** | `*.sln`, `*.csproj`, `global.json` | dotnet CLI, SDK version theo `global.json`, NuGet cache, project file |
-| **Services** | `docker-compose.yml`, `.env.example` | Docker daemon, compose services, port PostgreSQL/Redis, `.env` |
-| **Registry** | `.npmrc`, `pip.conf`, `.git/config` | git user/SSH (warning), npm/pip registry |
+| Node.js | `package.json` | runtime, `engines`/`.nvmrc`, npm, lockfile, `node_modules`, build tool |
+| Python | `pyproject.toml`, `requirements.txt`, `Pipfile` | runtime, `requires-python`, `.venv`, requirements, build/test declaration |
+| Java | `pom.xml`, Gradle files | JDK, version, Maven/Gradle/wrapper, Maven cache, build file |
+| .NET | `*.sln`, `*.csproj`, `global.json` | dotnet CLI, SDK, NuGet cache, build files |
+| Services | Compose file, `.env.example` | Docker daemon, Compose state, PostgreSQL/Redis TCP port, `.env` |
+| Registry | `.npmrc`, pip config, Git remote | Git identity/SSH, npm registry, pip config |
 
-Mỗi check có **bằng chứng cụ thể** (version tìm thấy, file tồn tại, lệnh chạy được) và **bước khắc phục chính xác** đi kèm — không đoán mò.
+## Yêu cầu
 
-### 🔍 2 chế độ chẩn đoán trên cùng một bộ check
-
-| Chế độ | Cách hoạt động | Khi nào dùng |
-|---|---|---|
-| `flat` | Checklist phẳng: liệt kê từng check pass/fail độc lập | Muốn thấy toàn cảnh từng mục |
-| `dep` (**mặc định**) | Dựng đồ thị phụ thuộc từ `depends_on`, gom lỗi **hệ quả** về **root cause**, vẽ chuỗi `a -> b -> c` và chỉ rõ sửa cái nào trước | Developer mới / muốn biết sửa gì trước |
-
-Ví dụ: thiếu SDK khiến deps không cài được → `dep` gom thành **1 root cause** thay vì 2 lỗi độc lập.
-
-### 📦 Output đa dạng cho người và máy
-
-- **Terminal** — giao diện Rich có màu: header tổng quan, bảng check, `HOW TO FIX`, `ROOT CAUSES`, spinner khi đang kiểm tra và panel kết quả cho `study`/`--fix`
-- **JSON** — machine-readable, schema ổn định (`schema_version: 1.0`), dùng được cho CI/script
-- **Exit code chuẩn** — `0` pass, `1` có lỗi, `2` lỗi input/nội bộ
-
-> `--format json` luôn xuất JSON thuần, không lẫn màu, spinner hay panel để dùng an toàn trong CI/script.
-
-### 🛠️ `--fix` tự sửa an toàn (có kiểm soát)
-
-- Chỉ áp dụng remediation nằm trong **operation whitelist** — lệnh dạng **argv an toàn**, không shell operator
-- **Backup** tất cả file bị ảnh hưởng vào `.setup-doctor-backup/<timestamp>/` trước khi sửa
-- **Rollback** chỉ đảm bảo cho thao tác **reversible** (file cấu hình nhỏ); install/restore/start-service được đánh dấu **non-reversible** và ghi rõ trong log
-- **Re-check sau khi sửa** — exit code phản ánh trạng thái cuối, không phải trước fix
-- Chống **path traversal** — file trong `step.files` phải nằm trong repo
-
-### 🤖 AI tăng cường (tùy chọn)
-
-- Gợi ý lệnh sửa **động theo evidence** thực tế + giải thích nguyên nhân tự nhiên
-- An toàn: `sanitize` evidence trước khi gửi, **quota chung** giới hạn chi phí, validate schema output
-- **Fallback rule-based** hoàn toàn khi AI không khả dụng/key thiếu — không bao giờ crash
-- AI không quyết định `status`/`severity` — chỉ bổ sung nội dung hiển thị
-
-### 🔬 `study` — harness nghiên cứu
-
-- Chạy đồng loạt trên nhiều repo, đối chiếu ground truth → metrics **precision/recall/accuracy/clarity/f1**
-- **Deterministic** (không dùng AI) → tái lập được kết quả cho nghiên cứu
-- Xuất CSV/JSON phục vụ phân tích so sánh `flat` vs `dep`
-
-### 🎯 Nền tảng
-
-- Tự động phát hiện ecosystem qua marker file
-- Plugin-style: thêm checker mới = thêm module + entry point, không sửa framework
-- Config linh hoạt: file TOML + env + CLI flag
-
-## Yêu cầu hệ thống
-
-- **Python ≥ 3.11**
-- **Windows-first**: MVP chạy chính trên Windows (remediation theo OS mặc định Windows). Hỗ trợ Linux/macOS là roadmap — chưa tuyên bố đa nền tảng đầy đủ.
+- Python 3.11 trở lên.
+- `pipx` được khuyến nghị để dùng CLI từ bất kỳ thư mục nào.
+- Remediation rule-based hiện ưu tiên Windows. Checkers chạy trên Linux/macOS, nhưng các command fix nền tảng và coverage package manager chưa đầy đủ.
 
 ## Cài đặt
 
-```bash
-# Phát triển (kèm pytest và Rich terminal UI)
-pip install -e ".[dev]"
-
-# Hoặc bản thường
-pip install -e .
-
-# Thêm hỗ trợ AI (openai/anthropic)
-pip install -e ".[ai]"
-```
-
-## Sử dụng nhanh
+### Dùng CLI từ mọi repository
 
 ```bash
-# Chẩn đoán repo (mặc định: mode=dep, output text)
-setup-doctor check /path/to/repo
+# Ubuntu/Debian, nếu chưa có pipx
+sudo apt install pipx
+pipx ensurepath
 
-# Checklist phẳng thay vì root-cause
-setup-doctor check /path/to/repo --mode flat
+# Mở terminal mới, sau đó cài bản local đang phát triển
+cd ~/code/Dev-Setup-Doctor
+pipx install --editable '.[ai]'
 
-# Output JSON machine-readable (dùng cho CI/script)
-setup-doctor check /path/to/repo --format json --output report.json
-
-# Áp dụng remediation an toàn (có backup, có re-check)
-setup-doctor check /path/to/repo --fix
-
-# Tăng cường AI (cần API key — xem phần Cấu hình)
-setup-doctor check /path/to/repo --ai
-
-# Nghiên cứu: so sánh flat vs dep trên nhiều repo
-setup-doctor study repos.txt --ground-truth research/ground_truth --output-dir research/output
-
-# Phiên bản
+# Kiểm tra
 setup-doctor --version
-
-# Xem toàn bộ lệnh và tuỳ chọn
-setup-doctor --help
 ```
 
-### Ví dụ terminal UI (repo `expressjs/express` sau khi clone)
+`--editable` nghĩa là các thay đổi source được dùng ngay. Khi `pyproject.toml` thay đổi dependency, refresh môi trường pipx:
 
-```
-╭──────────────────────────── SETUP DOCTOR ────────────────────────────╮
-│ Setup needs attention                                                 │
-│ C:\tmp\sd-repo-express | windows | dep diagnosis                     │
-│ 4 passed  2 failed  4 skipped                                         │
-╰──────────────────────────────────────────────────────────────────────╯
-┏━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ Status ┃ Check                  ┃ Evidence                           ┃
-┡━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ PASS   │ node.runtime.present   │ node v24.14.1 found                │
-│ FAIL   │ node.lockfile.exists  │ no lockfile found                  │
-│ FAIL   │ node.deps.installed   │ node_modules missing               │
-│ SKIP   │ node.build.ready      │ no build script declared           │
-└────────┴────────────────────────┴────────────────────────────────────┘
-╭───────────────────────────── HOW TO FIX ─────────────────────────────╮
-│ Lockfile exists                                                       │
-│   1. Generate lockfile  $ npm install --package-lock-only             │
-│ Dependencies installed                                                │
-│   1. Install dependencies  $ npm ci                                   │
-╰──────────────────────────────────────────────────────────────────────╯
-╭──────────────────────────── ROOT CAUSES ─────────────────────────────╮
-│ Lockfile exists is a root cause of 2 failing check(s)                 │
-│   node.lockfile.exists -> node.deps.installed                         │
-╰──────────────────────────────────────────────────────────────────────╯
-Exit code: 1
+```bash
+pipx reinstall setup-doctor
 ```
 
-> **Cách đọc:** tool chỉ **đọc** (không tự sửa). `--fix` mới thay đổi — và chỉ với operation trong whitelist.
+### Phát triển local
 
-### Exit codes
+```bash
+git clone <repository-url>
+cd Dev-Setup-Doctor
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[dev,ai]'
+```
 
-| Code | Ý nghĩa |
+Trên Debian/Ubuntu, nếu không tạo được venv, cài `python3-venv` trước. Không dùng `--break-system-packages` để cài package vào Python hệ thống.
+
+## Bắt đầu nhanh
+
+```bash
+# Check repository hiện tại; mode dep là mặc định
+setup-doctor check .
+
+# Check repository khác
+setup-doctor check ~/code/click
+
+# Checklist phẳng thay vì phân tích root cause
+setup-doctor check . --mode flat
+
+# JSON cho CI/script
+setup-doctor check . --format json --output report.json
+
+# Chỉ chạy rule-based, không gọi AI
+setup-doctor check . --no-ai
+
+# Bật AI nếu đã cấu hình key
+setup-doctor check . --ai
+
+# Áp dụng remediation an toàn, backup và check lại
+setup-doctor check . --fix
+
+# Xem tất cả options
+setup-doctor check --help
+```
+
+## Terminal UI và exit code
+
+Output text dùng Rich: header tóm tắt, bảng checks, panel `HOW TO FIX`, `ROOT CAUSES`, và trạng thái AI.
+
+```text
+AI: enhanced (openai/gpt-4o-mini); 2 suggestion(s) added
+  1. [RULE] Create a virtual environment  $ py -m venv .venv
+  2. [AI] Check Python 3 availability  $ python3 --version
+```
+
+`[RULE]` là remediation deterministic; `[AI]` là gợi ý bổ sung từ provider. Nếu AI không khả dụng, report vẫn hoàn chỉnh và ghi `AI: unavailable`; tool fallback sang rule-based.
+
+| Exit code | Ý nghĩa |
 |---|---|
-| `0` | Tất cả check pass, **hoặc** repo không thuộc ecosystem hỗ trợ (output đúng format đã chọn) |
-| `1` | Có ≥ 1 check `fail` (severity `error`) |
-| `2` | Path repo không tồn tại / không phải thư mục, **hoặc** lỗi nội bộ tool |
+| `0` | Không có check `error` fail, hoặc không nhận diện ecosystem hỗ trợ |
+| `1` | Có ít nhất một check `error` fail |
+| `2` | Input path không hợp lệ hoặc lỗi nội bộ |
+| `130` | Người dùng hủy bằng Ctrl+C |
 
-## Check đang hỗ trợ (catalog)
+`--format json` luôn xuất JSON thuần, không có spinner hoặc terminal UI. `--output` chỉ áp dụng cho JSON.
 
-| Ecosystem | Checks |
-|---|---|
-| **Node.js** | `node.runtime.present`, `node.package_json.valid`, `node.sdk.version`, `node.pkgmgr.present`, `node.lockfile.exists`, `node.deps.installed`, `node.build.ready` |
-| **Python** | `python.runtime.present`, `python.version`, `python.env.present` (yêu cầu `pyvenv.cfg`), `python.deps.installed`, `python.build.ready` |
-| **Java** | `java.runtime.present`, `java.version`, `java.maven.gradle.present`, `java.deps.cached` (warning), `java.build.ready` |
-| **.NET** | `dotnet.runtime.present`, `dotnet.sdk.version`, `dotnet.restore.ready` (warning), `dotnet.build.ready` |
-| **Services** | `services.container.present`, `services.compose.up`, `services.db.port`, `services.redis`, `services.envfile` |
-| **Registry** | `registry.git.user` (warning), `registry.git.ssh` (warning, skip khi remote HTTPS), `registry.npm`, `registry.pypi` |
+## AI (tùy chọn)
 
-Phát hiện ecosystem tự động qua marker file (`package.json`, `pyproject.toml`, `pom.xml`, `*.sln`, `docker-compose.yml`...). Xem chi tiết: **spec mục 3.7**.
+AI không quyết định `status`, `severity`, root cause hay exit code. Nó chỉ thêm remediation và giải thích root cause sau khi rule-based diagnosis hoàn tất.
 
-## Cấu hình
+### Cấu hình
 
-Tự động tìm `setup-doctor.toml` theo thứ tự: `--config <path>` → thư mục repo → thư mục hiện tại → `~/.setup-doctor/setup-doctor.toml`.
+Tạo cấu hình tool cục bộ, không commit API key:
+
+```bash
+mkdir -p ~/.setup-doctor
+cp .env.example ~/.setup-doctor/.env
+chmod 600 ~/.setup-doctor/.env
+```
+
+Sửa `~/.setup-doctor/.env`:
+
+```dotenv
+SETUP_DOCTOR_API_KEY="your_api_key"
+SETUP_DOCTOR_AI=true
+SETUP_DOCTOR_AI_MODEL="gpt-4o-mini"
+```
+
+Khi chạy từ repository bất kỳ, tool tìm `.env` theo thứ tự: cạnh file `setup-doctor.toml` được chọn, thư mục hiện tại, rồi `~/.setup-doctor/.env`. Biến môi trường thật luôn ưu tiên hơn `.env`.
+
+Chọn provider/model qua `setup-doctor.toml`:
 
 ```toml
-[mode]
-default = "dep"            # flat | dep
-
 [ai]
-enabled = false            # bật AI (CLI --ai/--no-ai ghi đè)
-provider = "openai"        # openai | anthropic
+enabled = true
+provider = "openai" # openai | anthropic
 model = "gpt-4o-mini"
-max_requests = 10          # quota chung cho tất cả AI requests
+max_requests = 10
 timeout_sec = 20
-
-[output]
-format = "text"            # text | json
 ```
 
-**Thứ tự ưu tiên:** `CLI flag > env (SETUP_DOCTOR_*) > config file > default`.
+Evidence gửi AI chỉ gồm check ID, OS và evidence đã sanitize; tool không gửi nội dung file repository hay credentials. AI cần API credentials của người dùng hoặc một backend do tổ chức vận hành; không nhúng shared key vào CLI.
 
-### Environment variables
+## Cấu hình tool
 
-| Biến | Ý nghĩa |
+Tool tìm `setup-doctor.toml` theo thứ tự:
+
+1. `--config <path>`
+2. `setup-doctor.toml` trong repository được check
+3. `setup-doctor.toml` trong thư mục hiện tại
+4. `~/.setup-doctor/setup-doctor.toml`
+
+Ví dụ đầy đủ có trong [`setup-doctor.toml.example`](setup-doctor.toml.example). Thứ tự ưu tiên giá trị: CLI flags → environment/`.env` → TOML → defaults.
+
+| Environment variable | Mục đích |
 |---|---|
-| `SETUP_DOCTOR_MODE` | Chế độ mặc định (`flat`/`dep`) |
-| `SETUP_DOCTOR_FORMAT` | Format mặc định (`text`/`json`) |
-| `SETUP_DOCTOR_AI` | Bật AI (`1`/`true`/`yes`) |
+| `SETUP_DOCTOR_MODE` | `flat` hoặc `dep` |
+| `SETUP_DOCTOR_FORMAT` | `text` hoặc `json` |
+| `SETUP_DOCTOR_AI` | `true`, `yes` hoặc `1` để bật AI |
 | `SETUP_DOCTOR_AI_MODEL` | Model AI |
-| `SETUP_DOCTOR_API_KEY` | API key cho AI (chỉ đọc từ env, không lưu trong file) |
+| `SETUP_DOCTOR_API_KEY` | API key của provider |
 
-## An toàn
+## Safe fixes
 
-- **Mặc định read-only**: chạy `check` không thay đổi gì trong repo (chỉ đọc file, stat, chạy `--version`, TCP probe).
-- **`--fix` giới hạn**:
-  - Chỉ áp dụng remediation có `safe_fix=true`, `source=manual` và **operation trong whitelist**.
-  - Backup vào `.setup-doctor-backup/<timestamp>/` trước khi sửa.
-  - **Rollback** chỉ đảm bảo cho operation **reversible** (file cấu hình nhỏ đã backup, vd `create-env`). Install/restore/start-service là **non-reversible** và luôn được ghi rõ trong log.
-  - Chống path traversal: file trong `step.files` phải nằm trong repo.
-  - **Re-check sau fix** — exit code phản ánh trạng thái cuối cùng (không phải trước fix).
-- **AI**: chỉ gửi `check_id`/evidence đã `sanitize`/OS lên LLM; không gửi credentials/nội dung file repo; API key chỉ từ env; quota chung; LLM không bao giờ quyết định `status`/`severity`.
-- **Nghiên cứu (`study`)**: luôn chạy rule-based — deterministic, tái lập được.
+`--fix` chỉ thực thi remediation có `safe_fix=true`, `source=manual` và operation nằm trong whitelist. Các operation gồm cài Node/Python dependencies, tạo venv, restore Java/.NET dependencies, khởi động Docker Compose, tạo `.env` từ `.env.example`, và tạo Node lockfile.
 
-## Phát triển
+- File khai báo trong remediation phải nằm trong repository (chống path traversal).
+- File liên quan được backup vào `.setup-doctor-backup/<timestamp>/`.
+- Chỉ thao tác file nhỏ như tạo `.env` có rollback; install/restore/start service là non-reversible.
+- Sau fix, tool luôn chạy check lại; exit code phản ánh trạng thái cuối.
+
+Luôn review report trước khi chạy `--fix`, đặc biệt với repository có dependencies hoặc services quan trọng.
+
+## CLI reference
 
 ```bash
-# Cài editable + dev deps
-pip install -e ".[dev]"
+setup-doctor --version
+setup-doctor --help
 
-# Chạy toàn bộ test (83 tests)
-python -m pytest
+setup-doctor check <repo_path> [--mode flat|dep] [--format text|json]
+                                  [--output report.json] [--fix]
+                                  [--ai|--no-ai] [--config path] [--verbose]
 
-# Chạy theo nhóm
-python -m pytest tests/unit/          # unit
-python -m pytest tests/integration/   # integration (fixer, cli)
-python -m pytest tests/unit/test_engine.py -k dep   # riêng DAG dep mode
+setup-doctor study <repos_file> [--ground-truth path] [--output-dir directory]
 ```
 
-### Cấu trúc thư mục
+- `--verbose` in traceback khi tool gặp lỗi nội bộ.
+- `study` luôn deterministic, không gọi AI.
+- `repos_file` chứa một path repository trên mỗi dòng.
+- `study` xuất `study_results.csv` và `study_results.json`; output directory mặc định là `research/output`.
 
+## Kiến trúc
+
+```text
+CLI → config → ecosystem detection → read-only checkers → diagnosis engine
+    → optional AI enrichment → Rich/JSON output
+                         └→ optional fixer → re-check
 ```
+
+```text
 src/setup_doctor/
-├── cli.py            # CLI (check/study, exit codes, tri-state --ai)
-├── config.py         # TOML config + env + CLI (độ ưu tiên)
-├── models.py         # CheckResult, Report, Diagnosis, RemediationStep
-├── registry.py       # Phát hiện ecosystem + plugin checker (entry points)
-├── runner.py         # Pipeline: validate → detect → checkers → engine → AI
-├── engine.py         # Flat mode + dep mode (DAG, root causes)
-├── output.py         # Rich terminal UI / JSON renderer
-├── fixer.py          # --fix: whitelist op, backup, reversible-only rollback
-├── checkers/         # 6 checker read-only (plugin-style)
-├── ai/               # Provider + remediation + explainer (opt-in)
-├── study/            # Metrics + ground truth + CSV/JSON runner
-└── utils/            # run_command, versions, osdetect
+├── cli.py        # command parsing và exit code
+├── config.py     # TOML, environment, .env, CLI precedence
+├── runner.py     # pipeline check và optional AI
+├── engine.py     # flat/dep diagnosis, root causes
+├── fixer.py      # whitelist, backup, rollback/re-check flow
+├── output.py     # Rich terminal UI và JSON renderer
+├── checkers/     # ecosystem-specific read-only checks
+├── ai/           # provider, remediation, explainer, quota
+├── study/        # ground truth và metrics harness
+└── utils/        # commands, versions, OS detection
 ```
 
-### Kiến trúc
+Checker mới được đăng ký qua entry point `setup_doctor.checkers` trong `pyproject.toml`; registry có fallback built-in để test và editable run vẫn hoạt động.
 
-- **Checkers read-only**: mỗi ecosystem là một `Checker`, trả `list[CheckResult]`; KHÔNG chạy lệnh có side-effect khi check.
-- **Engine tách khỏi checkers**: chỉ làm việc trên `CheckResult` — dễ test bằng fixture.
-- **Fixer tách khỏi engine**: engine chỉ chẩn đoán, fixer chỉ sửa.
-- **Plugin-style**: thêm checker mới = thêm module + 1 dòng entry point trong `pyproject.toml` (kèm fallback import trực tiếp khi metadata rỗng).
+## Phát triển và kiểm thử
 
-## Nghiên cứu (AU4 - Research & Evaluate)
+```bash
+# Cài dependencies dev
+python -m pip install -e '.[dev,ai]'
 
-`setup-doctor study` so sánh hai chế độ theo **precision / recall / accuracy / clarity / f1** trên universe `expected_failures ∪ expected_passes` của ground truth. Các metric precision/recall/accuracy/f1 **giống hệt nhau** giữa flat và dep (vì cùng bộ check) — sự khác biệt nằm ở **clarity** (độ chính xác root cause) và đánh giá người dùng (thủ công). Chi tiết: **spec mục 4.7, 5**.
+# Toàn bộ suite
+PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest
 
-## Tài liệu
+# Unit tests hoặc một nhóm cụ thể
+.venv/bin/python -m pytest tests/unit/
+.venv/bin/python -m pytest tests/unit/test_engine.py -k dep
+```
 
-- **Spec**: `docs/superpowers/specs/2026-09-15-developer-setup-doctor-design.md` (v1.3)
-- **Kế hoạch triển khai**: `docs/superpowers/plans/2026-09-15-developer-setup-doctor.md`
+Suite hiện có 92 tests. `python` phải có trong `PATH` khi chạy một số command-runner tests; activate `.venv` hoặc prepend `.venv/bin` như ví dụ trên.
 
-## License
+## Giới hạn đã biết
 
-MIT
+- Python runtime checker hiện tìm `py`/`python`, chưa nhận diện `python3` độc lập trên Linux/macOS. Đây có thể tạo false fail trên một số máy.
+- Python dependency check chủ yếu dựa trên `requirements.txt`; project chỉ dùng `pyproject.toml`, `uv.lock`, Poetry hoặc Conda có thể bị `SKIP`.
+- Built-in remediation command còn thiên về Windows. AI có thể gợi ý lệnh Linux/macOS nhưng không thay đổi trạng thái check.
+- Git identity có severity `warning`, nhưng vẫn có thể xuất hiện trong root-cause panel khi fail.
+
+## Tài liệu và license
+
+- [Design specification](docs/superpowers/specs/2026-09-15-developer-setup-doctor-design.md)
+- [Implementation plan](docs/superpowers/plans/2026-09-15-developer-setup-doctor.md)
+- License: [MIT](LICENSE)
