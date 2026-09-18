@@ -17,3 +17,7 @@ venv/
 # Tool data
 .setup-doctor-backup/
 research/output/
+
+#docs
+role.md
+/docs/topic.md
