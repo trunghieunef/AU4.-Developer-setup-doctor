@@ -1,0 +1,16 @@
+# Copy this file to setup-doctor.toml in the repository you want to diagnose.
+
+[mode]
+default = "dep"
+
+[output]
+format = "text"
+
+[ai]
+enabled = false
+provider = "openai"       # openai | anthropic
+model = "gpt-4o-mini"
+max_requests = 10
+timeout_sec = 20
+
+# Put the API key in a local .env file instead (see .env.example).

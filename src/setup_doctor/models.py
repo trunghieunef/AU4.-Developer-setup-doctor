@@ -95,6 +95,24 @@ class Diagnosis:
 
 
 @dataclass
+class AIStatus:
+    status: str
+    provider: str
+    model: str
+    suggestions_added: int = 0
+    message: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "provider": self.provider,
+            "model": self.model,
+            "suggestions_added": self.suggestions_added,
+            "message": self.message,
+        }
+
+
+@dataclass
 class Report:
     schema_version: str = "1.0"
     repo_path: str = ""
@@ -104,6 +122,7 @@ class Report:
     summary: dict = field(default_factory=dict)
     checks: list[CheckResult] = field(default_factory=list)
     diagnosis: Diagnosis | None = None
+    ai_status: AIStatus | None = None
     exit_code: int = 0
 
     def to_dict(self) -> dict:
@@ -118,5 +137,7 @@ class Report:
         }
         if self.diagnosis is not None:
             d["diagnosis"] = self.diagnosis.to_dict()
+        if self.ai_status is not None:
+            d["ai"] = self.ai_status.to_dict()
         d["exit_code"] = self.exit_code
         return d

@@ -4,7 +4,7 @@ import os
 from .config import ToolConfig
 from .context import CheckContext
 from .engine import diagnose
-from .models import Report
+from .models import AIStatus, Report
 from .registry import detect_ecosystems, get_checkers
 from .utils.osdetect import detect_os
 
@@ -51,11 +51,11 @@ def run_check(repo_path: str, mode: str, config: ToolConfig, ai_enabled: bool = 
         checks.extend(checker.run(ctx))
     report = diagnose(checks, mode, repo_path, os_name)
     if ai_enabled:
-        _enhance_with_ai(report, config)
+        report.ai_status = _enhance_with_ai(report, config)
     return report
 
 
-def _enhance_with_ai(report: Report, config: ToolConfig) -> None:
+def _enhance_with_ai(report: Report, config: ToolConfig) -> AIStatus:
     from .ai.provider import get_provider, AIUnavailableError
     from .ai.remediation import AIRemediation
     from .ai.explainer import AIExplainer
@@ -63,12 +63,34 @@ def _enhance_with_ai(report: Report, config: ToolConfig) -> None:
     try:
         provider = get_provider(config)
     except AIUnavailableError:
-        return  # fallback: keep rule-based content only
+        return AIStatus(
+            status="unavailable", provider=config.ai.provider, model=config.ai.model,
+            message="AI unavailable; showing rule-based remediation only.",
+        )
     # Quota CHUNG cho remediation + explainer (NFR-9): không phải quota riêng mỗi phần.
     quota = AICallQuota(config.ai.max_requests)
     remediator = AIRemediation(provider, quota)
+    suggestions_added = 0
     for c in report.checks:
         if c.status.value == "fail":
+            manual_count = len(c.remediation)
             c.remediation = remediator.suggest(c, report.os)
+            suggestions_added += len(c.remediation) - manual_count
     if report.diagnosis is not None:
         report.diagnosis.ai_explanation = AIExplainer(provider, quota).explain(report.diagnosis)
+    if remediator.failures:
+        return AIStatus(
+            status="unavailable", provider=config.ai.provider, model=config.ai.model,
+            suggestions_added=suggestions_added,
+            message="AI request failed; showing rule-based remediation where AI was unavailable.",
+        )
+    if suggestions_added:
+        return AIStatus(
+            status="enhanced", provider=config.ai.provider, model=config.ai.model,
+            suggestions_added=suggestions_added,
+            message="AI suggestions are marked [AI].",
+        )
+    return AIStatus(
+        status="no_suggestions", provider=config.ai.provider, model=config.ai.model,
+        message="AI returned no additional valid suggestions.",
+    )

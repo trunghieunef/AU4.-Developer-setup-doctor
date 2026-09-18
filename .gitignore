@@ -12,6 +12,7 @@ dist/
 # Env
 .venv/
 venv/
+.env
 
 # Tool data
 .setup-doctor-backup/

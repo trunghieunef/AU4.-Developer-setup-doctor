@@ -44,6 +44,7 @@ class AIRemediation:
     def __init__(self, provider, quota: "AICallQuota"):
         self._provider = provider
         self._quota = quota
+        self.failures = 0
 
     def suggest(self, check: CheckResult, os_name: str) -> list[RemediationStep]:
         manual = list(check.remediation)
@@ -54,6 +55,7 @@ class AIRemediation:
         try:
             data = self._provider.complete(_SYSTEM_PROMPT, user, dict)
         except Exception:
+            self.failures += 1
             return manual
         if not _is_valid_data(data):
             return manual

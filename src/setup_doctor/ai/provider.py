@@ -63,7 +63,7 @@ class AnthropicClient(AIProvider):
 
 
 def get_provider(cfg: ToolConfig, api_key: str | None = None) -> AIProvider:
-    api_key = api_key or os.environ.get("SETUP_DOCTOR_API_KEY")
+    api_key = api_key or os.environ.get("SETUP_DOCTOR_API_KEY") or cfg.ai.api_key
     if not api_key:
         raise AIUnavailableError("Missing API key; set SETUP_DOCTOR_API_KEY")
     if cfg.ai.provider == "anthropic":

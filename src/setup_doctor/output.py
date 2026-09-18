@@ -11,11 +11,22 @@ def render_text(report: Report) -> str:
     marks = {
         CheckStatus.PASS: "[PASS]", CheckStatus.FAIL: "[FAIL]", CheckStatus.SKIP: "[SKIP]",
     }
+    if report.ai_status:
+        ai = report.ai_status
+        detail = f"{ai.status} ({ai.provider}/{ai.model})"
+        if ai.suggestions_added:
+            detail += f"; {ai.suggestions_added} suggestion(s) added"
+        lines.append(f"AI: {detail}")
+        if ai.message:
+            lines.append(f"    {ai.message}")
+    else:
+        lines.append("AI: disabled (rule-based remediation only)")
     for c in report.checks:
         lines.append(f"{marks[c.status]} {c.check_id}: {c.evidence}")
         if c.status == CheckStatus.FAIL:
             for i, r in enumerate(c.remediation, 1):
-                lines.append(f"    fix {i}: {r.step} -> {r.command}")
+                source = "AI" if r.source == "ai" else "RULE"
+                lines.append(f"    fix {i} [{source}]: {r.step} -> {r.command}")
     if report.diagnosis and report.diagnosis.root_causes:
         lines.append("root causes:")
         for rc in report.diagnosis.root_causes:

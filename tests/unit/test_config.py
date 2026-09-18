@@ -5,7 +5,8 @@ import pytest
 from setup_doctor.config import load_config
 
 
-def test_defaults(tmp_path):
+def test_defaults(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     cfg = load_config()
     assert cfg.default_mode == "dep"
     assert cfg.output_format == "text"
@@ -43,7 +44,8 @@ def test_cli_overrides_file_and_env(tmp_path, monkeypatch):
     assert cfg.ai.enabled is True          # không bị CLI ghi đè vì overrides không có "ai"
 
 
-def test_ai_flag_tristate(monkeypatch):
+def test_ai_flag_tristate(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("SETUP_DOCTOR_AI", raising=False)
     cfg = load_config(overrides={"ai": True})
     assert cfg.ai.enabled is True
@@ -55,3 +57,17 @@ def test_auto_discover_config_in_repo(tmp_path, monkeypatch):
     (tmp_path / "setup-doctor.toml").write_text('[mode]\ndefault = "flat"\n', encoding="utf-8")
     cfg = load_config(search_from=tmp_path)
     assert cfg.default_mode == "flat"
+
+
+def test_dotenv_loads_ai_settings_without_overriding_shell(tmp_path, monkeypatch):
+    cfg_file = tmp_path / "setup-doctor.toml"
+    cfg_file.write_text("", encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        'SETUP_DOCTOR_API_KEY="from-file"\nSETUP_DOCTOR_AI_MODEL=from-dotenv\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("SETUP_DOCTOR_API_KEY", raising=False)
+    monkeypatch.setenv("SETUP_DOCTOR_AI_MODEL", "from-shell")
+    cfg = load_config(str(cfg_file))
+    assert cfg.ai.api_key == "from-file"
+    assert cfg.ai.model == "from-shell"
